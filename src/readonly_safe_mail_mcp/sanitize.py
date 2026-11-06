@@ -36,6 +36,9 @@ from .textnorm import (
     strip_sentinels,
 )
 
+# Bump whenever output for the same input could change: the index is rebuilt under the new version.
+SANITIZER_VERSION = "2"
+
 CODE_MASK = "[code hidden]"
 LINK_MASK = "[link removed]"
 WITHHELD_SECURITY = "[Body withheld: classified as an account-security email. Read it in your mail client.]"
@@ -275,6 +278,10 @@ _COMMON_TLDS = frozenset(
     "com net org io co us uk ca de fr au in jp me info biz edu gov mil app dev ai ly gl to "
     "link page site online xyz tech cloud shop store club live email".split()
 )
+# Percent-encoded URLs (share links, mailto: bodies, redirect parameters): "https%3A%2F%2F...".
+ENCODED_URL_RE = re.compile(
+    r"""(?:[a-z][a-z0-9+.\-]{1,20}%(?:25)*3A)?%(?:25)*2F%(?:25)*2F[^\s<>"'()\[\]{}]+""", re.I
+)
 URL_RE = re.compile(r"""(?:[a-z][a-z0-9+.\-]{1,20}://|www\.)[^\s<>"'()\[\]{}]+""", re.I)
 IP_RE = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?(?:[/?#][^\s<>\"']*)?(?!\w|\.\d)")
 BARE_DOMAIN_RE = re.compile(
@@ -337,6 +344,7 @@ def redact(text: str) -> tuple[str, int, int]:
             return s
         return code(m)
 
+    text = ENCODED_URL_RE.sub(link, text)
     text = URL_RE.sub(link, text)
     text = IP_RE.sub(link, text)
     text = BARE_DOMAIN_RE.sub(domain, text)
@@ -420,6 +428,10 @@ def _display_body(structure: Structure, texts: dict[str, str]) -> tuple[str, boo
     return "", False
 
 
+# Some senders put a whole HTML document in the text/plain part.
+_HTML_IN_PLAIN_RE = re.compile(r"^\s*(?:<!doctype html|<html[\s>])|<(?:head|body|meta|table)[\s>]", re.I)
+
+
 def sanitize_message(fm: FetchedMessage, rules: Rules) -> SanitizedMessage:
     headers, raw_subject, raw_from = parse_headers(fm.header_bytes)
 
@@ -441,7 +453,8 @@ def sanitize_message(fm: FetchedMessage, rules: Rules) -> SanitizedMessage:
             return result(WITHHELD_TOO_LARGE, True, attachments, ["body withheld"])
         try:
             decoded = decode_part(raw, part.encoding, part.params.get("charset"))
-            decoded = html_to_text(decoded) if part.subtype == "html" else strip_sentinels(decoded)
+            is_html = part.subtype == "html" or _HTML_IN_PLAIN_RE.search(decoded[:4000]) is not None
+            decoded = html_to_text(decoded) if is_html else strip_sentinels(decoded)
         except DecodeError:
             return result(WITHHELD_UNDECODABLE, True, attachments, ["body withheld"])
         texts[part.part_id] = display_form(decoded)

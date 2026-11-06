@@ -42,6 +42,9 @@ HEADER_FIELDS = ("FROM", "TO", "CC", "DATE", "SUBJECT", "MESSAGE-ID", "IN-REPLY-
 MAX_HEADER_BYTES = 65_536
 DEFAULT_MAX_ATTACHMENT_BYTES = 20_000_000
 FETCH_BATCH = 100
+PART_BATCH_BYTES = 20_000_000
+# imaplib refuses response lines over 1 MB; a UID SEARCH of a 150k-message folder exceeds that.
+imaplib._MAXLINE = max(imaplib._MAXLINE, 20_000_000)
 DEFAULT_TIMEOUT = 30
 
 HEADER_ITEM = f"(UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({' '.join(HEADER_FIELDS)})]<0.{MAX_HEADER_BYTES}>)"
@@ -281,8 +284,7 @@ class MailSource:
     # -- search & fetch --
 
     def search_uids(self, *, min_uid: int | None = None, since: date | None = None) -> list[int]:
-        """UIDs in the open folder. Note: imaplib caps response lines at 1 MB, so callers
-        with very large folders should search in UID windows (min_uid)."""
+        """UIDs in the open folder."""
         self._folder()
         args: list[str] = []
         if min_uid is not None:
@@ -398,6 +400,81 @@ class MailSource:
         return FetchedMessage(
             self.account, f.name, f.uidvalidity, uid, h.size, h.header_bytes, structure, parts
         )
+
+    def fetch_messages(self, uids: list[int]) -> list[FetchedMessage]:
+        """Batched fetch_message for sync: headers and structures in batches, then each
+        body text part id fetched across many messages at once. Never attachments.
+        A message whose part fetch fails is returned with structure=None (withheld)."""
+        f = self._folder()
+        headers = {h.uid: h for h in self.fetch_headers(uids)}
+        structures = self.fetch_structures([u for u in uids if u in headers])
+        failed: set[int] = set()
+        parts: dict[int, dict[str, bytes | None]] = {u: {} for u in headers}
+        by_part: dict[str, list[tuple[int, int]]] = {}
+        for u, st in structures.items():
+            if isinstance(st, Structure):
+                for p in st.body_text_parts():
+                    by_part.setdefault(p.part_id, []).append((u, p.size))
+        for part_id, items in by_part.items():
+            self._check_part_id(part_id)
+            # Batches bounded by count and by advertised size (advisory; the cap is enforced per part).
+            batch: list[int] = []
+            budget = 0
+            for u, advertised in items + [(-1, 0)]:
+                size = min(advertised, self._max_part_bytes)
+                if batch and (u < 0 or len(batch) >= FETCH_BATCH or budget + size > PART_BATCH_BYTES):
+                    self._fetch_parts_into(batch, part_id, parts, failed)
+                    batch, budget = [], 0
+                if u >= 0:
+                    batch.append(u)
+                    budget += size
+        out = []
+        for u in sorted(headers):
+            st = structures.get(u)
+            structure = st if isinstance(st, Structure) and u not in failed else None
+            h = headers[u]
+            out.append(
+                FetchedMessage(
+                    self.account,
+                    f.name,
+                    f.uidvalidity,
+                    u,
+                    h.size,
+                    h.header_bytes,
+                    structure,
+                    parts[u] if structure else {},
+                )
+            )
+            self._structures.pop((f.name, f.uidvalidity, u), None)  # keep memory flat during long syncs
+        return out
+
+    def _fetch_parts_into(
+        self, uids: list[int], part_id: str, parts: dict[int, dict[str, bytes | None]], failed: set[int]
+    ) -> None:
+        cap = self._max_part_bytes
+        try:
+            got = self._fetch(uids, f"(UID BODY.PEEK[{part_id}]<0.{cap + 1}>)")
+        except ResponseParseError:
+            if len(uids) == 1:
+                failed.add(uids[0])
+            else:
+                for u in uids:
+                    self._fetch_parts_into([u], part_id, parts, failed)
+            return
+        for u in uids:
+            d = got.get(u, {})
+            val = next((v for k, v in d.items() if k.startswith(f"BODY[{part_id}]")), _MISSING)
+            if val is _MISSING:
+                failed.add(u)
+                continue
+            b = (
+                b""
+                if val is None
+                else val
+                if isinstance(val, bytes)
+                else str(val).encode("utf-8", "surrogateescape")
+            )
+            parts[u][part_id] = None if len(b) > cap else b
 
     def fetch_approved_attachment(self, approval: Approval, *, now: float | None = None) -> bytes:
         if approval.account != self.account:

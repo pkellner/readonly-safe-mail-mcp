@@ -5,7 +5,8 @@ readonly-safe-mail-mcp set-password A  store account A's password in the OS keyr
 readonly-safe-mail-mcp print-rules     show the effective merged rules per account
 readonly-safe-mail-mcp paths           show config and data directories
 readonly-safe-mail-mcp check           check config, credentials, and a read-only connection
-readonly-safe-mail-mcp sync            sync mail into the local index
+readonly-safe-mail-mcp sync            sync mail into the local index (shows progress)
+readonly-safe-mail-mcp status          sync status and message counts (offline)
 """
 
 from __future__ import annotations
@@ -23,12 +24,12 @@ from .config import Account, ConfigError, load_config
 from .imap import ImapError, MailSource
 from .sanitize import parse_headers
 
-NOT_YET = "not implemented yet (see docs/PLAN.md build order)"
-
 
 def _cmd_serve(_args) -> int:
-    print(f"MCP server {NOT_YET}", file=sys.stderr)
-    return 2
+    from .server import serve
+
+    serve()
+    return 0
 
 
 def _cmd_delete_password(args) -> int:
@@ -141,9 +142,66 @@ def _cmd_check(_args) -> int:
     return 0 if ok else 1
 
 
-def _cmd_sync(_args) -> int:
-    print(f"sync {NOT_YET}", file=sys.stderr)
-    return 2
+def _cmd_sync(args) -> int:
+    import threading
+    import time
+
+    from .sync import SyncBusy, sync_all
+
+    cfg = load_config()
+    if paths.looks_synced(cfg.data_dir):
+        print(f"Refusing to sync: {cfg.data_dir} looks like a cloud-synced folder.", file=sys.stderr)
+        return 1
+    if args.account and args.account not in cfg.accounts:
+        print(f"Unknown account {args.account!r}. Known: {sorted(cfg.accounts)}", file=sys.stderr)
+        return 1
+    mu, last = threading.Lock(), [0.0]
+
+    def progress(account: str, folder: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        with mu:
+            if done in (0, total) or now - last[0] >= 2:
+                last[0] = now
+                print(f"  {account}/{folder}: {done:,} / {total:,}", file=sys.stderr, flush=True)
+
+    print("Syncing (newest mail first; safe to interrupt and resume)...", file=sys.stderr)
+    stop = threading.Event()
+    try:
+        reports = sync_all(
+            cfg, accounts=[args.account] if args.account else None, progress=progress, stop=stop
+        )
+    except SyncBusy:
+        print("Another sync is already running (CLI or MCP server). Try again later.", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        stop.set()
+        print("Interrupted; progress is saved. Run sync again to continue.", file=sys.stderr)
+        return 130
+    ok = True
+    for r in reports:
+        if r.error:
+            ok = False
+            print(f"{r.account}: FAILED: {r.error}")
+        else:
+            print(f"{r.account}: +{r.added:,} indexed, -{r.removed:,} removed, {len(r.folders)} folders")
+    return 0 if ok else 1
+
+
+def _cmd_status(_args) -> int:
+    from . import index
+    from .query import status_lines
+
+    cfg = load_config()
+    path = index.index_path(cfg)
+    db = index.connect(path, create=False)
+    try:
+        for line in status_lines(index.account_status(db, sorted(cfg.accounts)), cfg.sync_if_older_than):
+            print(line)
+    finally:
+        if db:
+            db.close()
+    print(f"index: {path}" + ("" if path.exists() else " (not created yet: run sync)"))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,7 +223,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("check", help="check config, credentials, and a read-only connection").set_defaults(
         fn=_cmd_check
     )
-    sub.add_parser("sync", help="sync mail into the local index").set_defaults(fn=_cmd_sync)
+    sy = sub.add_parser("sync", help="sync mail into the local index")
+    sy.add_argument("--account")
+    sy.set_defaults(fn=_cmd_sync)
+    sub.add_parser("status", help="show sync status and indexed message counts (offline)").set_defaults(
+        fn=_cmd_status
+    )
     return p
 
 

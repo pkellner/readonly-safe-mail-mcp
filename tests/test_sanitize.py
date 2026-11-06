@@ -263,3 +263,38 @@ def test_attachment_listed_but_body_not_affected():
     out = run(m)
     assert out.body == "Please see attached"
     assert [(a.part_id, a.filename) for a in out.attachments] == [("2", "invoice.pdf")]
+
+
+# --- found in the first real-mailbox sync (2026-11-06) ----------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Share: https%3A%2F%2Fmailchi.mp%2Fexample%2Fnew-post",
+        "mailto:?body=Check%20out%20http%3A%2F%2Fevil.example%2Freset%3Ft%3Dabc",
+        "Sign up%3A%20https%3A%2F%2Fsignup.example%2Fx",
+        "redirect=https%253A%252F%252Fevil.example%252Freset",  # double-encoded
+        "next=%2F%2Fevil.example%2Fpath",
+    ],
+)
+def test_percent_encoded_urls_removed(text):
+    out, links, _ = redact(text)
+    assert links >= 1
+    for frag in ("mailchi", "evil", "signup.example", "%2F%2F", "%252F"):
+        assert frag not in out
+
+
+def test_html_document_in_text_plain_is_converted():
+    html = (
+        '<!DOCTYPE html><html><head><meta content="text/html; charset=utf-8" http-equiv="Content-Type" />'
+        '</head><body><p>Board meeting moved to Tuesday.</p><a href="https://evil.example/x">here</a></body></html>'
+    )
+    out = run(make(body=html))
+    assert "Board meeting moved to Tuesday." in out.body
+    assert "<meta" not in out.body and "http-equiv" not in out.body and "evil" not in out.body
+
+
+def test_plain_text_mentioning_tags_is_left_alone():
+    out = run(make(body="Use the <b> tag sparingly, and <i> too."))
+    assert "<b>" in out.body
