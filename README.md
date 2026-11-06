@@ -1,0 +1,1 @@
+# icloud-readonly-safe-mcp
