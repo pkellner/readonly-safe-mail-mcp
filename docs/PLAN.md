@@ -80,7 +80,7 @@ Applied to bodies, subjects, display names, attachment filenames, snippets, and 
 - **Never stores:** raw messages, HTML, links, codes, withheld bodies, attachment contents.
 - Location: `~/Library/Application Support/readonly-safe-mail-mcp/` (macOS) / platform equivalents. Directory and database, including `-wal` and `-shm` files, are owner-only (0700/0600; equivalent ACLs on Windows). Must not be placed in a synced folder (iCloud Drive, Dropbox, Desktop/Documents); server warns if it is.
 - **Policy generations.** Each index generation records a fingerprint of the effective rules, sanitizer version, and extraction behavior. Every content-returning tool (search, snippets, read, passages, thread) checks that the generation matches the active policy before returning, and re-checks if the policy changed mid-operation. On mismatch the affected accounts return "index rebuilding under updated security rules" instead of content; unaffected accounts stay available. The rebuild writes a **new** generation (separate database file) and publishes it atomically on success. A failed or offline rebuild never reactivates the old generation. Cost: after a rule change, affected accounts are unsearchable until the rebuild completes (hours for large mailboxes). That is the price of stricter rules taking effect immediately.
-- Estimated size: ~0.5–2 GB for ~100k messages (estimate; `doctor` reports a projection before first sync).
+- Estimated size: ~0.5–2 GB for ~100k messages (estimate; `check` reports a projection before first sync).
 - Optional scope limits: per-account, per-folder, "last N years".
 
 ### 4.3 Sync policy (no timers, no background schedule)
@@ -165,13 +165,13 @@ README opens with install. Example (GitHub-pinned; PyPI form shown once publishe
 
 ```sh
 uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp set-password icloud
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp doctor
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp check
 uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp sync
 ```
 
 Copy-paste configs for: Claude Desktop (`claude_desktop_config.json`, `mcpServers`), Claude Code (`claude mcp add`), Cursor (`~/.cursor/mcp.json`), VS Code (`.vscode/mcp.json`, `servers`), generic stdio.
 
-CLI subcommands: `set-password`, `doctor` (test login, show one sanitized sample, project index size), `sync`, `print-rules` (effective merged rules).
+CLI subcommands: `set-password`, `check` (test login, show one sanitized sample, project index size), `sync`, `print-rules` (effective merged rules).
 
 ## 9. Repo, CI, and review hygiene
 
@@ -218,5 +218,5 @@ CLI subcommands: `set-password`, `doctor` (test login, show one sanitized sample
 4. MCP tools (§6) with compact outputs.
 5. Attachment approval + isolated extraction worker (§7), per platform.
 6. README (install first), threat model, security docs; CI.
-7. Owner runs `doctor` + first sync on real accounts.
+7. Owner runs `check` + first sync on real accounts.
 8. Repo goes public. PyPI per open decision.

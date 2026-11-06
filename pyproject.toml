@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "trustme>=1.1"]
 
 [project.scripts]
 readonly-safe-mail-mcp = "readonly_safe_mail_mcp.cli:main"
@@ -34,3 +34,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures contain long literal IMAP responses and email bodies.
+"tests/*" = ["E501", "B008"]

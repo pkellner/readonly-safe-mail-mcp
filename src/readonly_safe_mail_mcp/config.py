@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 
 from . import paths
+from .textnorm import match_form
 
 log = logging.getLogger(__name__)
 
@@ -132,9 +133,12 @@ class Rules:
 
     def __post_init__(self) -> None:
         if self.sensitive_keywords:
-            alternation = "|".join(re.escape(k) for k in self.sensitive_keywords)
+            # Keywords and text are both reduced to match_form (NFKD, marks and format chars
+            # removed, case-folded), so "p\u200bassword" and "ｐａｓｓｗｏｒｄ" still match.
+            forms = sorted({match_form(k) for k in self.sensitive_keywords} - {""}, key=len, reverse=True)
+            alternation = "|".join(re.escape(k) for k in forms)
             # Word-boundary match so "otp" doesn't hit "potpie".
-            self._kw_re = re.compile(rf"(?<!\w)({alternation})(?!\w)", re.IGNORECASE)
+            self._kw_re = re.compile(rf"(?<!\w)({alternation})(?!\w)")
 
     def sender_is_blocked(self, from_header: str) -> str | None:
         addr = parseaddr(from_header or "")[1].lower()
@@ -148,9 +152,9 @@ class Rules:
         if not self._kw_re:
             return None
         for t in texts:
-            m = self._kw_re.search(" ".join((t or "").split()))
+            m = self._kw_re.search(match_form(t or ""))
             if m:
-                return m.group(1).lower()
+                return m.group(1)
         return None
 
     def as_dict(self) -> dict:
