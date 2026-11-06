@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -22,6 +24,9 @@ from .sanitize import WITHHELD_UNDECODABLE, SanitizedMessage, parse_headers, san
 log = logging.getLogger(__name__)
 
 CHUNK = 100
+# iCloud serves message bodies slowly per connection (~10 s per 100 messages) but in
+# parallel well: 4 connections measured ~2.8x faster on 2026-11-06.
+CONNECTIONS = 4
 ProgressFn = Callable[[str, str, int, int], None]  # account, folder, done, total
 
 
@@ -72,8 +77,54 @@ def _sanitize(fm, acct: Account) -> SanitizedMessage | None:
         return SanitizedMessage(headers, WITHHELD_UNDECODABLE, True, (), ("body withheld",))
 
 
+class _Fetchers:
+    """A pool of extra read-only connections that fetch batches in parallel. Each thread
+    owns one connection. The caller still writes to the index on a single thread."""
+
+    def __init__(self, open_fn: Callable[[], MailSource], n: int) -> None:
+        self._open = open_fn
+        self._local = threading.local()
+        self._sources: list[MailSource] = []
+        self._mu = threading.Lock()
+        self.window = 2 * n
+        self.pool = ThreadPoolExecutor(n, thread_name_prefix="fetch")
+
+    def fetch(self, folder: str, uidvalidity: int, batch: list[int]):
+        loc = self._local
+        if getattr(loc, "src", None) is None:
+            loc.src, loc.folder = self._open(), None
+            with self._mu:
+                self._sources.append(loc.src)
+        if loc.folder != folder:
+            if loc.src.examine(folder).uidvalidity != uidvalidity:
+                raise ImapError("folder changed on the server during sync; it will restart next sync")
+            loc.folder = folder
+        return loc.src.fetch_messages(batch)
+
+    def ordered(self, folder: str, uidvalidity: int, batches: list[list[int]], stop):
+        """Yield (batch, messages) in submission order, keeping at most `window` in flight."""
+        pending: deque = deque()
+        it = iter(batches)
+        while True:
+            while len(pending) < self.window and not (stop and stop.is_set()):
+                b = next(it, None)
+                if b is None:
+                    break
+                pending.append((b, self.pool.submit(self.fetch, folder, uidvalidity, b)))
+            if not pending:
+                return
+            b, fut = pending.popleft()
+            yield b, fut.result()
+
+    def close(self) -> None:
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        for src in self._sources:
+            src.close()
+
+
 def _sync_folder(
     src: MailSource,
+    fetchers: _Fetchers,
     db,
     acct: Account,
     name: str,
@@ -99,9 +150,9 @@ def _sync_folder(
     if progress and total:
         progress(acct.name, name, 0, total)
 
-    def run(batch: list[int]) -> None:
+    def apply(batch: list[int], fetched) -> None:
         nonlocal done
-        for fm in src.fetch_messages(batch):
+        for fm in fetched:
             sm = _sanitize(fm, acct)
             if sm is not None:
                 index.store(db, acct.name, name, info.uidvalidity, fm.uid, fm.size, sm)
@@ -114,14 +165,15 @@ def _sync_folder(
         if progress:
             progress(acct.name, name, done, total)
 
-    for i in range(0, len(new), CHUNK):  # ascending, extends high_uid upward
-        if stop and stop.is_set():
-            return
-        run(new[i : i + CHUNK])
-    for i in range(0, len(backfill), CHUNK):  # descending, extends low_uid downward
-        if stop and stop.is_set():
-            return
-        run(backfill[i : i + CHUNK])
+    # New mail ascending (extends high_uid up), then backfill descending (extends low_uid down).
+    # Batches are fetched in parallel but applied strictly in this order, so every UID in
+    # [low_uid, high_uid] is indexed whenever state is saved.
+    batches = [new[i : i + CHUNK] for i in range(0, len(new), CHUNK)]
+    batches += [backfill[i : i + CHUNK] for i in range(0, len(backfill), CHUNK)]
+    for batch, fetched in fetchers.ordered(name, info.uidvalidity, batches, stop):
+        apply(batch, fetched)
+    if stop and stop.is_set():
+        return
     st.complete = True
     index.save_folder(db, acct.name, name, st, len(uids))
     db.commit()
@@ -135,21 +187,31 @@ def sync_account(
     stop: threading.Event | None = None,
     open_source: Callable[[Account, str], MailSource] | None = None,
     password_fn: Callable[[str], str] = credentials.get_password,
+    connections: int = CONNECTIONS,
 ) -> SyncReport:
     report = SyncReport(acct.name)
     db = index.connect(index.index_path(cfg), create=True)
     assert db is not None
     try:
         password = password_fn(acct.name)
-        with (open_source or MailSource.open)(acct, password) as src:
+        opener = open_source or MailSource.open
+        with opener(acct, password) as src:
             permitted = [n for n, _, ok in src.list_folders() if ok]
-            index.drop_folders_except(db, acct.name, permitted)
-            db.commit()
+        index.drop_folders_except(db, acct.name, permitted)
+        index.add_pending_folders(db, acct.name, permitted)
+        db.commit()
+        fetchers = _Fetchers(lambda: opener(acct, password), max(1, connections))
+        try:
             for name in _folder_order(permitted):
-                _sync_folder(src, db, acct, name, report, progress, stop)
+                # A fresh control connection per folder: it sits idle while the fetchers
+                # work, and iCloud drops idle connections during a long folder.
+                with opener(acct, password) as src:
+                    _sync_folder(src, fetchers, db, acct, name, report, progress, stop)
                 report.folders.append(name)
                 if stop and stop.is_set():
                     break
+        finally:
+            fetchers.close()
         index.record_attempt(db, acct.name, ok=not (stop and stop.is_set()))
     except Exception as e:  # recorded per account; other accounts keep syncing
         ours = isinstance(e, (ImapError, credentials.CredentialError))
@@ -185,5 +247,6 @@ def sync_all(
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            while t.is_alive():  # short joins so signals reach the main thread
+                t.join(0.5)
         return [reports[n] for n in names]

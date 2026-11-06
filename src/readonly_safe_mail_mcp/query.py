@@ -230,8 +230,10 @@ def _attachments(r: sqlite3.Row) -> str:
         return ""
     if not atts:
         return ""
-    items = ", ".join(f"{a['name']} ({a['type']}, {a['size']:,} B)" for a in atts)
-    return f"Attachments: {items} [contents not available]\n"
+    items = ", ".join(f"{a['name']} (part {a['part']}, {a['type']}, {a['size']:,} B)" for a in atts)
+    if r["withheld"]:
+        return f"Attachments: {items} [not openable: message withheld]\n"
+    return f"Attachments: {items} [open with request_attachments; the user approves]\n"
 
 
 def format_message(r: sqlite3.Row, *, body_chars: int | None = None) -> str:

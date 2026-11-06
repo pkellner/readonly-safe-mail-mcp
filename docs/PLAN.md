@@ -1,13 +1,13 @@
 # readonly-safe-mail-mcp — Design Plan (for review)
 
-Status: **proposal, revised after review round 1; not yet built.** Reviewers: please challenge anything below, especially §3 (threat model) and §11 (questions for reviewers).
+Status: **built through step 6 (0.2.0); see §13.** Reviewers: please challenge anything below, especially §3 (threat model) and §11 (questions for reviewers).
 
 ## 1. Goal
 
 A local MCP server that lets an AI assistant (Claude, Cursor, VS Code, any MCP client) **search and read** across several personal email accounts. It makes three separate promises, of different strengths:
 
 1. **Structural:** the server exposes no operation that sends or modifies mail. Enforced by the absence of such code and by a narrow IMAP layer (§4.4).
-2. **Best effort:** all mail and attachment content passes through credential redaction and security-message classification before it is indexed or returned. Detection is heuristic; see §3 residual risks.
+2. **Best effort:** all mail and attachment text passes through credential redaction and security-message classification before it is indexed or returned. Approved images are returned as pixels, with metadata stripped but no redaction (§7.3). Detection is heuristic; see §3 residual risks.
 3. **Structural:** attachment content is fetched only after human approval through the configured trusted approval channel (§7).
 
 These hold only if the assistant cannot independently reach the credentials, the index files, or the server's code and rules. **An AI agent with shell or file tools running as your OS user (Claude Code, Cursor agent mode, Codex, etc.) can reach all of them.** §3.1 gives the recommended setup; the README states it prominently.
@@ -42,7 +42,8 @@ Started from a ~300-line prototype (`icloud-readonly-mcp`, Python, MCP SDK 2.x):
 
 **Explicit residual risks (documented, not solved):**
 - Content the AI reads is sent to the AI provider as part of the chat. Filters remove credentials, not privacy.
-- Filters are heuristic: homoglyphs, codes spelled as words ("four eight two…"), codes inside images.
+- Filters are heuristic: homoglyphs, codes spelled as words ("four eight two…").
+- Approved images are returned as pixels and are not redacted. A code, QR code, or screenshot of a login page inside an approved image reaches the AI. The approval dialog says so for image items.
 - The local index is a second (sanitized) copy of the user's mail on disk.
 - Over-redaction: years, order numbers, phone fragments get masked. Deliberate.
 - An assistant that also has desktop-automation tools (browser/computer use) could operate the approval dialog itself. Independent human approval holds only without such tools.
@@ -164,7 +165,7 @@ Token-efficiency principles: snippets not bodies, paging not dumps, quote-stripp
 
 ## 7. Attachments
 
-Never downloaded or stored by default; only sanitized metadata (filename, type, size, part id) is indexed. Supported formats in v1: PDF, DOCX, TXT/CSV/HTML. Images, archives, and executables are refused.
+Never downloaded or stored by default; only sanitized metadata (filename, type, size, part id) is indexed. Supported formats in v1: PDF, DOCX, XLSX, PPTX, TXT/CSV/TSV/Markdown, HTML, VCF (vCard), ICS (calendar invites), EML (attached emails), and images (JPEG, PNG, HEIC, GIF, WebP, TIFF, BMP). Archives, executables, disk images, and legacy binary Office files are refused. Per-format handling is in §7.3.
 
 ### 7.1 Approval
 - `request_attachments([{message_id, part}...])` shows **the human** a batched table (account, date, from, subject, filename, size) with per-item checkboxes → Approve selected / Deny.
@@ -179,7 +180,17 @@ After approval the main server fetches that one part into memory and hands the b
 - filesystem access limited to the interpreter/parser files and the supplied bytes;
 - limits on memory, CPU time, pages, decompressed bytes, and output size, enforced during decoding, not after.
 
-The worker exits after one request; timeout or cancellation kills it. The parent runs the extracted text through the sanitizer (§4.1) before returning it. Platform mechanisms: macOS `sandbox-exec` profile; Linux namespaces/seccomp via `bwrap` or `unshare` when present; Windows restricted token + job object. **Where the strong mechanism is unavailable, attachment opening is refused** (config `attachments: ask-unsandboxed` can override, with a warning). A timeout alone is never described as a sandbox. The package ships and tests these restrictions; users configure nothing.
+The worker exits after one request; timeout or cancellation kills it. The parent runs the extracted text through the sanitizer (§4.1) before returning it. Platform mechanisms: macOS `sandbox-exec` profile (built and tested, `isolate.py`); Linux `bwrap --unshare-all` when present (built, not yet tested on Linux); Windows: none yet, so attachments are refused there (restricted token + job object is future work). **Where the strong mechanism is unavailable, attachment opening is refused** (config `attachments: ask-unsandboxed` can override, with a warning). A timeout alone is never described as a sandbox. The package ships and tests these restrictions; users configure nothing.
+
+### 7.3 Formats
+All parsing and decoding happens inside the §7.2 worker.
+- **PDF, DOCX, PPTX:** text extracted (PPTX per slide), then sanitized (§4.1).
+- **ICS:** events rendered as text (title, times, location, organizer, attendees, description), then sanitized.
+- **EML:** headers and body (plain preferred; HTML through the hidden-content stripper), nested attachments listed by name only, then sanitized.
+- **XLSX:** cell values only (no formulas, macros, or external links), output as CSV-like text per sheet, then sanitized. Limits on sheets, rows, and cells.
+- **TXT/CSV/HTML:** decoded, then sanitized (HTML goes through the same hidden-content stripping as bodies).
+- **VCF:** fields rendered as text, then sanitized. Embedded `PHOTO` data is treated like an image.
+- **Images:** decoded and re-encoded in the worker (pixels only). All metadata is dropped (EXIF, GPS location, XMP, embedded thumbnails), and the image is downscaled to a size cap. It is returned as image content, not text. The text sanitizer cannot redact pixels, so a code or QR code in an image reaches the AI after human approval (§3 residual risk).
 
 ## 8. Install & client support
 
@@ -237,11 +248,11 @@ CLI subcommands: `set-password`, `delete-password`, `check` (test login, show on
 
 ## 13. Build order
 
-1. Rename repo; restructure into package (accounts, rules layering, keyring).
-2. Read-only IMAP layer (§4.4: narrow methods, verified TLS, limits); sanitizer pipeline (§4.1) + adversarial tests.
-3. Sanitized SQLite/FTS5 index with policy generations; initial + incremental sync; search-triggered sync policy.
-4. MCP tools (§6) with compact outputs.
-5. Attachment approval + isolated extraction worker (§7), per platform.
-6. README (install first), threat model, security docs; CI.
-7. Owner runs `check` + first sync on real accounts.
-8. Repo goes public. PyPI per open decision.
+1. ✅ Rename repo; restructure into package (accounts, rules layering, keyring).
+2. ✅ Read-only IMAP layer (§4.4: narrow methods, verified TLS, limits); sanitizer pipeline (§4.1) + adversarial tests.
+3. ✅ Sanitized SQLite/FTS5 index with policy generations; initial + incremental sync (parallel fetch, resumable); search-triggered sync policy.
+4. ✅ MCP tools (§6) with compact outputs.
+5. ✅ Attachment approval + isolated extraction worker (§7): macOS done and live-tested; Linux `bwrap` untested; Windows refused.
+6. ✅ README (install first), THREAT_MODEL.md, SECURITY.md, CONTRIBUTING.md, filter-bypass issue template; CI (SHA-pinned, 3 OS × 3 Python), CodeQL, Dependabot, personal-data guard; `file` credential backend and permission warnings in `check` (§3.1). CI first runs on push.
+7. ◐ Owner runs `check` + first sync on real accounts (iCloud done 2026-11-06; dedicated-user setup steps not yet tested).
+8. Repo goes public; branch protection on `main`; PyPI per open decision.

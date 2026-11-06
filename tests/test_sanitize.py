@@ -105,7 +105,7 @@ def test_keyword_only_in_hidden_html():
 
 
 def test_keyword_only_in_quoted_reply():
-    body = "Sounds good!\n\nOn Tue, Nov 4, 2026 at 3:12 PM Bank <b@x.com> wrote:\n> your verification code is 1234"
+    body = "Sounds good!\n\nOn Tue, Nov 4, 2026 at 3:12 PM Bank <b@x.example> wrote:\n> your verification code is 1234"
     assert withheld(run(make("Re: hi", body)))
 
 
@@ -176,12 +176,14 @@ def test_gmail_html_quote_removed():
 
 
 def test_outlook_plain_tail_removed():
-    body = "My answer.\n\nFrom: Jane <j@x.com>\nSent: Tuesday\nTo: Me\nSubject: Q\n\nOriginal question"
+    body = "My answer.\n\nFrom: Jane <j@x.example>\nSent: Tuesday\nTo: Me\nSubject: Q\n\nOriginal question"
     assert run(make("RE: Q", body)).body == "My answer."
 
 
 def test_inline_replies_kept():
-    body = "On Tue, Nov 4 Jane <j@x.com> wrote:\n> question one?\nAnswer one.\n> question two?\nAnswer two."
+    body = (
+        "On Tue, Nov 4 Jane <j@x.example> wrote:\n> question one?\nAnswer one.\n> question two?\nAnswer two."
+    )
     assert run(make("Re", body)).body == "Answer one.\nAnswer two."
 
 
@@ -190,7 +192,7 @@ def test_only_quoted_body_falls_back_to_quote():
 
 
 def test_forwarded_content_kept():
-    body = "FYI\n\n---------- Forwarded message ---------\nFrom: A <a@x.com>\nDate: Mon\nSubject: S\nTo: B\n\nThe content"
+    body = "FYI\n\n---------- Forwarded message ---------\nFrom: A <a@x.example>\nDate: Mon\nSubject: S\nTo: B\n\nThe content"
     assert "The content" in run(make("Fwd: S", body)).body
 
 

@@ -188,6 +188,7 @@ def test_rule_change_selects_new_generation(tmp_path, mailbox):
     assert "$210" not in db.execute("SELECT group_concat(body) FROM messages").fetchone()[0]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_files_are_owner_only(tmp_path, mailbox):
     cfg = make_cfg(tmp_path)
     with FakeIMAPServer(mailbox) as server:
@@ -219,3 +220,45 @@ def test_bad_fts_syntax_falls_back(tmp_path, mailbox):
     with FakeIMAPServer(mailbox) as server:
         run_sync(cfg, server)
     assert len(query.search(db_for(cfg), query='donation "ask (letter')) >= 1
+
+
+def test_parallel_sync_interrupt_and_resume(tmp_path):
+    import threading
+
+    box = {"INBOX": {u: msg(f"note {u}", f"body {u}", day=1 + u % 28) for u in range(1, 451)}}
+    cfg = make_cfg(tmp_path)
+    stop = threading.Event()
+
+    def progress(account, folder, done, total):
+        if done >= 200:
+            stop.set()
+
+    with FakeIMAPServer(box) as server:
+        [rep] = run_sync(cfg, server, progress=progress, stop=stop, connections=3)
+    db = db_for(cfg)
+    st = index.folder_state(db, "icloud", "INBOX")
+    indexed = {r[0] for r in db.execute("SELECT uid FROM messages")}
+    assert not st.complete and st.high_uid == 450
+    assert indexed == set(range(st.low_uid, 451))  # contiguous newest-first range, no gaps
+    with FakeIMAPServer(box) as server:
+        [rep2] = run_sync(cfg, server, connections=3)
+    assert rep2.added == 450 - len(indexed)
+    assert db.execute("SELECT count(*) FROM messages").fetchone()[0] == 450
+    assert index.folder_state(db, "icloud", "INBOX").complete
+
+
+def test_status_not_complete_until_every_folder_done(tmp_path, mailbox):
+    import threading
+
+    cfg = make_cfg(tmp_path)
+    stop = threading.Event()
+
+    def progress(account, folder, done, total):
+        if folder == "INBOX" and done == total:
+            stop.set()
+
+    with FakeIMAPServer(mailbox) as server:
+        run_sync(cfg, server, progress=progress, stop=stop)
+    db = db_for(cfg)
+    [st] = index.account_status(db, ["icloud"])
+    assert st.folders == 2 and not st.complete  # Archive is pending, not "fully synced"

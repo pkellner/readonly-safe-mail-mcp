@@ -1,6 +1,6 @@
 [project]
 name = "readonly-safe-mail-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only, redacting, multi-account IMAP mail MCP server with a local sanitized search index"
 readme = "README.md"
 license = "MIT"
@@ -10,6 +10,11 @@ dependencies = [
   "pyyaml>=6",
   "keyring>=25",
   "truststore>=0.10",
+  # Attachment readers. They only ever run inside the sandboxed worker (extract.py).
+  "pypdf>=6",
+  "pillow>=11",
+  "pillow-heif>=0.20",
+  "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]

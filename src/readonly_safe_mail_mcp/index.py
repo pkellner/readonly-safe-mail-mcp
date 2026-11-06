@@ -169,6 +169,15 @@ def drop_folders_except(db: sqlite3.Connection, account: str, keep: Iterable[str
     db.execute(f"DELETE FROM folders WHERE account=? AND folder NOT IN ({marks})", (account, *keep))
 
 
+def add_pending_folders(db: sqlite3.Connection, account: str, names: Iterable[str]) -> None:
+    """Record folders not started yet, so status doesn't report a partial sync as complete.
+    uidvalidity 0 never matches the server, so the first sync of the folder resets it."""
+    db.executemany(
+        "INSERT OR IGNORE INTO folders (account, folder, uidvalidity) VALUES (?, ?, 0)",
+        [(account, n) for n in names],
+    )
+
+
 def delete_missing(
     db: sqlite3.Connection, account: str, folder: str, uidvalidity: int, present: set[int]
 ) -> int:

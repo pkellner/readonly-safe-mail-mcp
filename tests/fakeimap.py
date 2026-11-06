@@ -174,15 +174,18 @@ class FakeIMAPServer:
                 conn, _ = self._sock.accept()
             except OSError:
                 return
-            try:
-                conn.settimeout(10)
-                if self._ssl:
-                    conn = self._ssl.wrap_socket(conn, server_side=True)
-                self._session(conn)
-            except (OSError, ssl.SSLError):
-                pass
-            finally:
-                conn.close()
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn) -> None:
+        try:
+            conn.settimeout(10)
+            if self._ssl:
+                conn = self._ssl.wrap_socket(conn, server_side=True)
+            self._session(conn)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            conn.close()
 
     def _session(self, conn) -> None:
         rf = conn.makefile("rb")

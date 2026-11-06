@@ -1,7 +1,7 @@
 """Command-line entry point.
 
 readonly-safe-mail-mcp                 run the MCP server over stdio (default)
-readonly-safe-mail-mcp set-password A  store account A's password in the OS keyring
+readonly-safe-mail-mcp set-password A  store account A's password (OS keyring, or --store file)
 readonly-safe-mail-mcp print-rules     show the effective merged rules per account
 readonly-safe-mail-mcp paths           show config and data directories
 readonly-safe-mail-mcp check           check config, credentials, and a read-only connection
@@ -33,14 +33,12 @@ def _cmd_serve(_args) -> int:
 
 
 def _cmd_delete_password(args) -> int:
-    import keyring.errors
-
-    try:
-        credentials.delete_password(args.account)
-    except keyring.errors.PasswordDeleteError:
+    removed = credentials.delete_password(args.account)
+    if not removed:
         print(f"No stored password for account {args.account!r}.", file=sys.stderr)
         return 1
-    print(f"Removed password for account {args.account!r} from the OS keyring.")
+    print(f"Removed the password for {args.account!r} from: {', '.join(removed)}.")
+    print("To invalidate it everywhere, also revoke the app password at your mail provider.")
     return 0
 
 
@@ -60,10 +58,8 @@ def _cmd_set_password(args) -> int:
     if not pw:
         print("Empty password; nothing stored.", file=sys.stderr)
         return 1
-    credentials.set_password(args.account, pw)
-    print(
-        f"Stored password for account {args.account!r} in the OS keyring (service {credentials.SERVICE!r})."
-    )
+    where = credentials.set_password(args.account, pw, backend=args.store)
+    print(f"Stored password for account {args.account!r} in {where}.")
     return 0
 
 
@@ -127,6 +123,15 @@ def _cmd_check(_args) -> int:
     else:
         print()
     print(f"attachments: {cfg.attachments}   sync_if_older_than: {cfg.sync_if_older_than}s")
+    try:
+        from .isolate import IsolationUnavailable, find_runner
+
+        print(f"attachment sandbox: {find_runner(cfg.attachments).name}")
+    except IsolationUnavailable as e:
+        print(f"attachment sandbox: none ({e})")
+    for w in permission_warnings(cfg):
+        print(f"WARNING: {w}")
+        ok = False
     for name, acct in cfg.accounts.items():
         print(f"- {name}: {acct.username} @ {acct.host}:{acct.port}")
         try:
@@ -140,6 +145,42 @@ def _cmd_check(_args) -> int:
         for line in lines:
             print(f"    {line}")
     return 0 if ok else 1
+
+
+def permission_warnings(cfg) -> list[str]:
+    """Paths other OS users could read or change (PLAN.md section 3.1)."""
+    import os
+    import stat
+    from pathlib import Path
+
+    if os.name != "posix":
+        return []
+    out = []
+    me = os.getuid()
+    code = Path(__file__).resolve().parent
+    checks = [
+        (cfg.config_dir, False),
+        (cfg.config_dir / "accounts.yaml", False),
+        (cfg.config_dir / "rules.yaml", False),
+        (credentials.credentials_dir(), True),
+        (cfg.data_dir, True),
+        (code, False),
+    ]
+    checks += [(p, True) for p in credentials.credentials_dir().glob("*")]
+    checks += [(p, False) for p in code.glob("*.py")]
+    for path, secret in checks:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        mode = stat.filemode(st.st_mode)
+        if st.st_uid != me and path != code and path.parent != code:
+            out.append(f"{path} is owned by another user")
+        if st.st_mode & 0o022:
+            out.append(f"{path} can be changed by other users ({mode})")
+        if secret and st.st_mode & 0o044:
+            out.append(f"{path} can be read by other users ({mode})")
+    return out
 
 
 def _cmd_sync(args) -> int:
@@ -164,6 +205,12 @@ def _cmd_sync(args) -> int:
                 last[0] = now
                 print(f"  {account}/{folder}: {done:,} / {total:,}", file=sys.stderr, flush=True)
 
+    import signal
+
+    def _terminate(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _terminate)  # pkill / kill stop it the same way Ctrl-C does
     print("Syncing (newest mail first; safe to interrupt and resume)...", file=sys.stderr)
     stop = threading.Event()
     try:
@@ -212,8 +259,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("serve", help="run the MCP server over stdio (default)").set_defaults(fn=_cmd_serve)
     sp = sub.add_parser("set-password", help="store an account password in the OS keyring")
     sp.add_argument("account")
+    sp.add_argument(
+        "--store",
+        choices=credentials.BACKENDS,
+        default="keyring",
+        help="where to keep it: the OS keyring (default) or a mode-600 file (dedicated-user installs)",
+    )
     sp.set_defaults(fn=_cmd_set_password)
-    dp = sub.add_parser("delete-password", help="remove an account password from the OS keyring")
+    dp = sub.add_parser("delete-password", help="remove an account's stored password (keyring and file)")
     dp.add_argument("account")
     dp.set_defaults(fn=_cmd_delete_password)
     pr = sub.add_parser("print-rules", help="show effective merged rules")

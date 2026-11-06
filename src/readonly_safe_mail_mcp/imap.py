@@ -28,6 +28,7 @@ from .mime import (
     PART_ID_PATTERN,
     PART_ID_RE,
     FetchedMessage,
+    Part,
     ResponseParseError,
     Structure,
     StructureError,
@@ -477,6 +478,11 @@ class MailSource:
             parts[u][part_id] = None if len(b) > cap else b
 
     def fetch_approved_attachment(self, approval: Approval, *, now: float | None = None) -> bytes:
+        return self.fetch_approved_part(approval, now=now)[0]
+
+    def fetch_approved_part(self, approval: Approval, *, now: float | None = None) -> tuple[bytes, Part]:
+        """The raw (still transfer-encoded) bytes of one approved attachment, and its part
+        description as the server reports it now."""
         if approval.account != self.account:
             raise PolicyError("approval is for a different account")
         if approval.expired(now):
@@ -493,4 +499,4 @@ class MailSource:
         data = self._fetch_part_bytes(approval.uid, approval.part_id, self._max_attachment_bytes)
         if data is None:
             raise PolicyError(f"attachment exceeds the size limit ({self._max_attachment_bytes} bytes)")
-        return data
+        return data, part

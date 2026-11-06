@@ -13,16 +13,19 @@ import time
 import anyio
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import ImageContent, TextContent, ToolAnnotations
+from pydantic import BaseModel
 
-from . import __version__, index
+from . import __version__, approval, attachments, index, isolate
 from . import query as q
 from .config import Config, ConfigError, load_config
+from .imap import DEFAULT_MAX_ATTACHMENT_BYTES
 from .sync import SyncBusy, sync_all
 
 log = logging.getLogger(__name__)
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
+ASKS_USER = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=False)
 FIRST_WAIT, MAX_WAIT = 2.0, 10.0
 NO_INDEX = (
     "No index yet for the current rules. A background sync has been started; search again in a "
@@ -42,12 +45,14 @@ class SyncRunner:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, cfg: Config) -> None:
+    def start(self, cfg: Config) -> bool:
+        """Start a background sync. False if one is already running."""
         with self._mu:
             if self.running:
-                return
+                return False
             self._thread = threading.Thread(target=self._run, args=(cfg,), daemon=True)
             self._thread.start()
+            return True
 
     @staticmethod
     def _run(cfg: Config) -> None:
@@ -86,7 +91,8 @@ def build_server() -> MCPServer:
         instructions=(
             "Read-only search over the user's email (local sanitized index). Links and codes are "
             "removed and account-security emails are withheld by design; do not try to recover them. "
-            "Workflow: search -> find_passages or read_message on the ids you need."
+            "Workflow: search -> find_passages or read_message on the ids you need. Attachments: "
+            "request_attachments with the id and part shown by read_message; the user approves each."
         ),
     )
     runner = SyncRunner()
@@ -163,8 +169,10 @@ def build_server() -> MCPServer:
         age, interval = time.time() - last, cfg.sync_if_older_than
         if age < interval:
             return []
-        runner.start(cfg)
-        if age < 2 * interval:
+        started = runner.start(cfg)
+        # Only the search that starts a sync waits for it. While a long sync (e.g. the initial
+        # backfill) is already running, later searches answer immediately from the index.
+        if not started or age < 2 * interval:
             return []
         start = time.monotonic()
         told = False
@@ -197,6 +205,58 @@ def build_server() -> MCPServer:
         """The conversation containing a message, oldest first, de-duplicated."""
         return _content(lambda db: q.get_thread(db, id), sep="\n\n---\n\n")
 
+    @mcp.tool(annotations=ASKS_USER, structured_output=False)
+    async def request_attachments(
+        ctx: Context, items: list[AttachmentRef]
+    ) -> list[TextContent | ImageContent]:
+        """Open attachments (id + part from read_message). The user approves each in a dialog;
+        approved ones are read in a sandbox and returned as sanitized text or images."""
+        cfg = _config()
+        fp = index.fingerprint(cfg)
+        try:
+            runner = isolate.find_runner(cfg.attachments)
+        except isolate.IsolationUnavailable as e:
+            raise ToolError(str(e)) from None
+        db = _open(cfg)
+        if db is None:
+            return [_text(NO_INDEX)]
+        try:
+            targets, refused = attachments.resolve(
+                db, [(i.id, i.part) for i in items], DEFAULT_MAX_ATTACHMENT_BYTES
+            )
+        finally:
+            db.close()
+        lines = list(refused)
+        if targets:
+            cands = [approval.Candidate(t.label, t.kind in ("image", "vcf")) for t in targets]
+            if approval.client_name(ctx) in cfg.trusted_elicitation_clients:
+                chosen = await approval.ask_elicitation(ctx, cands)
+            elif approval.channel_available():
+                chosen = await anyio.to_thread.run_sync(approval.ask_native, cands)
+            else:
+                raise ToolError("no approval dialog is available here, so attachments can't be opened")
+            approved = [t for i, t in enumerate(targets) if i in chosen]
+            lines += [f"{t.title}: not approved by the user" for t in targets if t not in approved]
+            opened = (
+                await anyio.to_thread.run_sync(lambda: attachments.open_approved(cfg, approved, runner))
+                if approved
+                else []
+            )
+        else:
+            opened = []
+        _check_policy(fp)
+        out: list[TextContent | ImageContent] = [_text(q.UNTRUSTED)]
+        for r in opened:
+            if r.error:
+                lines.append(f"{r.target.title}: {r.error}")
+                continue
+            note = f" [{'; '.join(r.notes)}]" if r.notes else ""
+            out.append(_text(f"=== {r.target.title}{note}\n{r.text}".rstrip()))
+            out += [ImageContent(type="image", data=d, mime_type=f"image/{f}") for d, f in r.images]
+        if lines:
+            out.append(_text("\n".join(lines)))
+        return out
+
     def _content(fn, sep: str = "\n") -> str:
         cfg = _config()
         fp = index.fingerprint(cfg)
@@ -213,6 +273,15 @@ def build_server() -> MCPServer:
         return q.UNTRUSTED + "\n" + (sep.join(out) if out else "No matching passages.")
 
     return mcp
+
+
+class AttachmentRef(BaseModel):
+    id: int
+    part: str
+
+
+def _text(s: str) -> TextContent:
+    return TextContent(type="text", text=s)
 
 
 def serve() -> None:
