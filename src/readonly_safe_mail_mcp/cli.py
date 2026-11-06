@@ -31,11 +31,30 @@ def _cmd_serve(_args) -> int:
     return 2
 
 
+def _cmd_delete_password(args) -> int:
+    import keyring.errors
+
+    try:
+        credentials.delete_password(args.account)
+    except keyring.errors.PasswordDeleteError:
+        print(f"No stored password for account {args.account!r}.", file=sys.stderr)
+        return 1
+    print(f"Removed password for account {args.account!r} from the OS keyring.")
+    return 0
+
+
 def _cmd_set_password(args) -> int:
     cfg = load_config()
     if args.account not in cfg.accounts:
         print(f"Unknown account {args.account!r}. Known: {sorted(cfg.accounts)}", file=sys.stderr)
         return 1
+    if not sys.stdin.isatty():
+        print(
+            "set-password needs a real terminal so the password is not echoed. "
+            "Run it in Terminal.app (or another terminal window).",
+            file=sys.stderr,
+        )
+        return 2
     pw = getpass.getpass(f"App-specific password for {cfg.accounts[args.account].username}: ")
     if not pw:
         print("Empty password; nothing stored.", file=sys.stderr)
@@ -136,6 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("set-password", help="store an account password in the OS keyring")
     sp.add_argument("account")
     sp.set_defaults(fn=_cmd_set_password)
+    dp = sub.add_parser("delete-password", help="remove an account password from the OS keyring")
+    dp.add_argument("account")
+    dp.set_defaults(fn=_cmd_delete_password)
     pr = sub.add_parser("print-rules", help="show effective merged rules")
     pr.add_argument("--account")
     pr.set_defaults(fn=_cmd_print_rules)

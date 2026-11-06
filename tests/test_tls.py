@@ -58,6 +58,15 @@ def test_wrong_hostname_blocks_login():
     assert server.logins == 0
 
 
+def test_default_context_uses_os_trust_store_and_verifies():
+    from readonly_safe_mail_mcp.imap import default_tls_context
+
+    ctx = default_tls_context()
+    assert type(ctx).__module__.startswith("truststore")
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+    assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
+
+
 def test_unverified_context_refused():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -70,13 +79,12 @@ def test_unverified_context_refused():
 
 
 def test_check_command_reports_newest_sanitized_header(monkeypatch):
-    from readonly_safe_mail_mcp import cli
+    from readonly_safe_mail_mcp import cli, imap
 
     ca = trustme.CA()
-    real = ssl.create_default_context
 
     def trusting():
-        ctx = real()
+        ctx = ssl.create_default_context()
         ca.configure_trust(ctx)
         return ctx
 
@@ -86,7 +94,7 @@ def test_check_command_reports_newest_sanitized_header(monkeypatch):
     m["Date"] = "Fri, 06 Nov 2026 10:00:00 -0800"
     m.set_content("x")
     with FakeIMAPServer({"INBOX": {7: m.as_bytes()}}, ssl_context=server_ctx(ca, "localhost")) as server:
-        monkeypatch.setattr(ssl, "create_default_context", trusting)
+        monkeypatch.setattr(imap, "default_tls_context", trusting)
         ok, lines = cli._connection_check(account(server.port), "pw")
     assert ok, lines
     assert any("TLS verified" in ln for ln in lines)

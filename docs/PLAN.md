@@ -10,7 +10,7 @@ A local MCP server that lets an AI assistant (Claude, Cursor, VS Code, any MCP c
 2. **Best effort:** all mail and attachment content passes through credential redaction and security-message classification before it is indexed or returned. Detection is heuristic; see §3 residual risks.
 3. **Structural:** attachment content is fetched only after human approval through the configured trusted approval channel (§7).
 
-These hold only if the assistant cannot independently reach the credentials, the index files, or the server's code and rules (e.g. via a shell or file tool in the same session). The README states this assumption.
+These hold only if the assistant cannot independently reach the credentials, the index files, or the server's code and rules. **An AI agent with shell or file tools running as your OS user (Claude Code, Cursor agent mode, Codex, etc.) can reach all of them.** §3.1 gives the recommended setup; the README states it prominently.
 
 Example target prompt: *"Find all the emails from {person} where she talks about sending out the donation ask letter, and specifically where she talks about the costs."*
 
@@ -47,6 +47,28 @@ Started from a ~300-line prototype (`icloud-readonly-mcp`, Python, MCP SDK 2.x):
 - Over-redaction: years, order numbers, phone fragments get masked. Deliberate.
 - An assistant that also has desktop-automation tools (browser/computer use) could operate the approval dialog itself. Independent human approval holds only without such tools.
 - "Never stored" for attachments means no intentional disk persistence by the application; OS swap and crash dumps are not controlled.
+- A shell-capable AI agent running as the same OS user defeats every promise in §1 (see §3.1).
+
+### 3.1 Credential isolation and the recommended setup
+
+**Finding (live test, 2026-11-06).** `set-password` stores the app password in the OS keyring. On macOS the Keychain item's access list trusts the Python binary that created it, so any later process using that same Python reads it **with no prompt**. An AI coding agent with a shell, running as the same user, could therefore run one line of Python and obtain the app password, which grants full read/write/delete access to the mailbox at the provider and bypasses this server entirely. The same agent could also edit the server's code or `rules.yaml`, or read the index. This is not a bug in this project; it is how per-user credential stores work. **The OS user account is the security boundary.** Nothing inside a process can protect a secret from other code running as the same user.
+
+**Recommended setup (best practice: least privilege via a separate OS user).** Choose by how you use AI tools:
+
+| Your situation | Setup | Why |
+|---|---|---|
+| AI used only through chat clients whose only access to your machine is MCP tools (Claude Desktop, Cursor/VS Code chat with terminal and file tools off) | **Standard install** under your own user; password in the OS keyring. | The AI can call only this server's tools, which never return credentials. |
+| Any shell- or file-capable AI agent also runs under your user on this machine | **Dedicated-user install (recommended).** Install and run the server as a separate, unprivileged, non-admin OS user (e.g. `mailmcp`). Its code, config, rules, index and password live in that user's home, unreadable and unwritable by your account. Your MCP client launches it through a single narrow rule, e.g. sudoers `you ALL=(mailmcp) NOPASSWD: /Users/mailmcp/.local/bin/readonly-safe-mail-mcp serve`. | Standard privilege separation, the same pattern used for system services. The agent can call the server's tools but cannot read the password, alter the rules, or replace the code. |
+| You cannot create another OS user | Standard install, plus: keep agents out of the session where mail is configured, and **revoke the app password if an agent ever had unsupervised shell access.** | Documented residual risk, not a mitigation. |
+
+Rejected as the primary control: setting the Keychain item to "confirm every access". It prompts on every sync, trains the user to click Allow, and does not stop an agent from editing the server's code or rules.
+
+**Implementation consequences (scheduled in step 6):**
+- Credential backend `file` for dedicated-user installs: one file per account in that user's config directory, mode `0600`, owned by that user; the server refuses to read it if the permissions are looser. (A login Keychain is not available to a user with no GUI session, so the keyring cannot serve this mode.)
+- `check` warns when the server's code, config or credentials are writable or readable by any user other than the one running it.
+- The README gives step-by-step dedicated-user setup for macOS and Linux, tested before release. Windows equivalent (separate local account) is documented once tested; until then Windows docs state the risk.
+- `delete-password <account>` removes the local copy; revoking the app password at the provider is the only way to invalidate it everywhere. Both are documented next to `set-password`.
+- `set-password` must be run in a real terminal; it refuses when stdin is not a TTY (e.g. an AI client's `!` shell) so a password can never be echoed into a transcript.
 
 ## 4. Architecture
 
@@ -100,7 +122,7 @@ Initial sync for a large mailbox may take hours; run explicitly via `readonly-sa
 ### 4.4 IMAP layer
 - Narrow internal methods only: `fetch_headers`, `fetch_structure` (BODYSTRUCTURE), `fetch_text_part(part)`, `fetch_approved_attachment(approval)`. Each builds its own command; none accepts a raw command or fetch expression. Whole-message fetches (`BODY.PEEK[]`, `RFC822`) do not exist in the code.
 - Sync fetches BODYSTRUCTURE first, then only `text/plain` and `text/html` body parts under a size cap. Attachment parts, inline attachments, and nested `message/rfc822` parts are indexed as metadata only and never fetched during sync.
-- TLS: `ssl.create_default_context()` with hostname checking; no STARTTLS downgrade; credentials are never sent before verification succeeds. (Python's `imaplib.IMAP4_SSL` default context does **not** verify certificates; see §10.)
+- TLS: certificates verified against the **operating system's trust store** via `truststore` (macOS Keychain, Windows certificate store, Linux system bundle), TLS 1.2 minimum, hostname checking. Plain `ssl.create_default_context()` was rejected: python.org builds on macOS ship with no CA bundle, so every connection failed verification (found in the 2026-11-06 live test; it failed closed and no password was sent). No STARTTLS downgrade; credentials are never sent before verification succeeds. (Python's `imaplib.IMAP4_SSL` default context does **not** verify certificates; see §10.)
 - Connection and per-command timeouts on every operation.
 - Logs and exceptions never contain raw messages, attachment bytes, authentication exchanges, or redacted secrets.
 - Limits enforced while fetching and decoding, not after: message size, MIME nesting depth, per-part bytes, concurrent requests. Advertised sizes are advisory; actual byte counts are enforced. A rejected item reports which limit it exceeded; other messages remain usable.
@@ -171,7 +193,7 @@ uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonl
 
 Copy-paste configs for: Claude Desktop (`claude_desktop_config.json`, `mcpServers`), Claude Code (`claude mcp add`), Cursor (`~/.cursor/mcp.json`), VS Code (`.vscode/mcp.json`, `servers`), generic stdio.
 
-CLI subcommands: `set-password`, `check` (test login, show one sanitized sample, project index size), `sync`, `print-rules` (effective merged rules).
+CLI subcommands: `set-password`, `delete-password`, `check` (test login, show one sanitized sample, project index size), `sync`, `print-rules` (effective merged rules).
 
 ## 9. Repo, CI, and review hygiene
 
@@ -204,11 +226,14 @@ CLI subcommands: `set-password`, `check` (test login, show one sanitized sample,
 
 **Round 1 (external design review): all nine recommendations adopted.** Guarantee wording (§1), narrow IMAP methods (§4.4), concrete worker isolation (§7.2), bound single-use approvals with native dialog default (§7.1), decode-before-normalize pipeline (§4.1), policy generations (§4.2), TLS/storage/logging defaults (§4.2, §4.4), resource bounds (§4.4, §7.2), acceptance tests (§9). One qualification: where a platform lacks a strong isolation mechanism, attachment opening fails closed rather than shipping a weaker "sandbox".
 
+**Live test against iCloud (2026-11-06):** read-only `check` passed (TLS verified, LOGIN, LIST, EXAMINE, one partial header fetch; iCloud accepts `HEADER.FIELDS` with `<0.N>`). Findings: (a) default TLS context had no CA bundle on python.org macOS builds; fixed with `truststore` (§4.4). (b) Keychain items are readable without a prompt by any process using the same Python, so shell-capable agents can obtain the password; recommended setup added (§3.1). (c) `set-password` crashed without a TTY; now refuses cleanly.
+
 **Still open for reviewers:**
 1. Can you get a reset link, code, or token past the sanitizer? Test cases welcome.
 2. Should the index be encrypted (SQLCipher) beyond full-disk encryption?
 3. Is fail-closed on unsandboxed platforms (§7.2) the right call, or should Windows get a weaker-but-present worker?
 4. Any way a user config could weaken defaults silently (§5)?
+5. Is the dedicated-user install (§3.1) the right default recommendation, and is the narrow sudoers rule the cleanest way for an MCP client to launch it?
 
 ## 13. Build order
 

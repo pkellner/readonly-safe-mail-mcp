@@ -150,6 +150,19 @@ class Approval:
 _MISSING = object()
 
 
+def default_tls_context() -> ssl.SSLContext:
+    """Verify server certificates against the operating system's trust store
+    (macOS Keychain, Windows certificate store, Linux system bundle).
+
+    Plain ssl.create_default_context() relies on OpenSSL's CA paths, which are empty
+    for python.org builds on macOS, so every connection would fail verification."""
+    import truststore
+
+    ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
 class MailSource:
     def __init__(
         self,
@@ -182,7 +195,7 @@ class MailSource:
         timeout: float = DEFAULT_TIMEOUT,
         ssl_context: ssl.SSLContext | None = None,
     ) -> MailSource:
-        ctx = ssl_context or ssl.create_default_context()
+        ctx = ssl_context or default_tls_context()
         if ctx.verify_mode != ssl.CERT_REQUIRED or not ctx.check_hostname:
             raise PolicyError("TLS certificate and hostname verification must be enabled")
         # The TLS handshake (and certificate check) completes inside the constructor,
