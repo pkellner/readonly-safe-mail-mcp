@@ -1,0 +1,222 @@
+# readonly-safe-mail-mcp — Design Plan (for review)
+
+Status: **proposal, revised after review round 1; not yet built.** Reviewers: please challenge anything below, especially §3 (threat model) and §11 (questions for reviewers).
+
+## 1. Goal
+
+A local MCP server that lets an AI assistant (Claude, Cursor, VS Code, any MCP client) **search and read** across several personal email accounts. It makes three separate promises, of different strengths:
+
+1. **Structural:** the server exposes no operation that sends or modifies mail. Enforced by the absence of such code and by a narrow IMAP layer (§4.4).
+2. **Best effort:** all mail and attachment content passes through credential redaction and security-message classification before it is indexed or returned. Detection is heuristic; see §3 residual risks.
+3. **Structural:** attachment content is fetched only after human approval through the configured trusted approval channel (§7).
+
+These hold only if the assistant cannot independently reach the credentials, the index files, or the server's code and rules (e.g. via a shell or file tool in the same session). The README states this assumption.
+
+Example target prompt: *"Find all the emails from {person} where she talks about sending out the donation ask letter, and specifically where she talks about the costs."*
+
+### Non-goals (v1)
+- Sending or drafting mail. Ever.
+- OAuth providers (Microsoft 365 / Outlook.com no longer accept IMAP app passwords). Deferred to v2.
+- Semantic / embedding search. Keyword search plus sender/date filters, with the AI choosing search terms, covers the target prompts. Revisit only if real usage shows gaps.
+- Any network-listening transport. stdio only.
+
+## 2. Origin
+
+Started from a ~300-line prototype (`icloud-readonly-mcp`, Python, MCP SDK 2.x): single iCloud account, live IMAP search, EXAMINE + BODY.PEEK, link stripping, code masking, sender/keyword body withholding, CI grep guard. This plan generalizes it to multiple accounts, replaces live IMAP search with a local sanitized index, and fixes issues found in review (§10).
+
+## 3. Threat model
+
+**Primary attack chain:** the AI reads a reset email → opens the link (or uses the code) → takes over an account. The design breaks the chain in several independent places:
+
+| Link in chain | Control |
+|---|---|
+| AI can send/modify mail | No SMTP code. IMAP layer exposes only narrow methods (§4.4) that build their own commands; nothing accepts a raw command or fetch expression. EXAMINE only (RFC 9051 §6.3.3 forbids permanent state changes). CI grep guard as a secondary tripwire. |
+| AI sees reset link | Every URL stripped from every body (not only suspicious ones). HTML converted to text with `href`/`src` discarded. Bare domains (`evil.com/reset?t=…`) also stripped. |
+| AI sees code / token | Digit runs, mixed alnum tokens (upper **and** lower case), long high-entropy strings masked. |
+| AI sees security email | Body withheld (headers only) if sender domain blocklisted or sensitive keyword present. |
+| Filter evasion | Unicode NFKC normalization; zero-width/format chars removed before matching; hidden HTML (`display:none`) dropped. |
+| Search oracle (probe for code digit-by-digit) | Search runs against the **sanitized** index, where codes and withheld bodies were never stored. |
+| AI opens a link anyway | Out of scope for this server; README advises not combining with browser/fetch tools. |
+| Prompt injection via email content | Results labeled as untrusted third-party data. Cannot be fully prevented; mitigated by having no write/send/open capabilities. |
+| Attachments as an exfil or exploit vector | Never opened without human approval via a channel the AI cannot answer (§7.1). Parsed in an isolated worker with no network, no credentials, and resource limits (§7.2). |
+
+**Explicit residual risks (documented, not solved):**
+- Content the AI reads is sent to the AI provider as part of the chat. Filters remove credentials, not privacy.
+- Filters are heuristic: homoglyphs, codes spelled as words ("four eight two…"), codes inside images.
+- The local index is a second (sanitized) copy of the user's mail on disk.
+- Over-redaction: years, order numbers, phone fragments get masked. Deliberate.
+- An assistant that also has desktop-automation tools (browser/computer use) could operate the approval dialog itself. Independent human approval holds only without such tools.
+- "Never stored" for attachments means no intentional disk persistence by the application; OS swap and crash dumps are not controlled.
+
+## 4. Architecture
+
+```
+ AI client (Claude / Cursor / VS Code)
+        │ stdio (MCP)
+        ▼
+ readonly-safe-mail-mcp ──► SQLite index (sanitized text only, local disk)
+        │
+        └─(sync + approved attachments only)─► IMAP providers (read-only, allowlisted commands)
+```
+
+Queries **never** hit the network. IMAP is used only for (a) syncing new mail into the index and (b) fetching a single attachment after human approval.
+
+### 4.1 Sanitizer pipeline (single code path for everything stored or returned)
+Fixed order, so no step can introduce characters a later step would miss (e.g. `pass&#x200B;word` gains a zero-width character only at entity decoding):
+
+1. MIME transfer-encoding and charset decoding
+2. HTML → text, including entity decoding (drop script/style/head/hidden; discard all attributes)
+3. Unicode NFKC normalization; remove zero-width and format characters
+4. Security classification (sender domain, keywords) on the **full** decoded text of **every** body alternative (plain and HTML), before anything is discarded
+5. Quoted-reply removal
+6. URL and code/token redaction
+7. Truncation
+
+Applied to bodies, subjects, display names, attachment filenames, snippets, and extracted attachment text. Withhold reasons are generic ("account-security email") and never echo matched content. Any decode or parse failure withholds the affected content; raw content is never returned as a fallback.
+
+### 4.2 Local index
+- SQLite + FTS5 (BM25 ranking), WAL mode so reads proceed during sync writes.
+- Stores per message: account, folder, UID, UIDVALIDITY, date, from, to, subject (sanitized), sanitized body (cap ~20 KB), withheld flag + reason, attachment metadata (sanitized filename, MIME type, size, part id).
+- **Never stores:** raw messages, HTML, links, codes, withheld bodies, attachment contents.
+- Location: `~/Library/Application Support/readonly-safe-mail-mcp/` (macOS) / platform equivalents. Directory and database, including `-wal` and `-shm` files, are owner-only (0700/0600; equivalent ACLs on Windows). Must not be placed in a synced folder (iCloud Drive, Dropbox, Desktop/Documents); server warns if it is.
+- **Policy generations.** Each index generation records a fingerprint of the effective rules, sanitizer version, and extraction behavior. Every content-returning tool (search, snippets, read, passages, thread) checks that the generation matches the active policy before returning, and re-checks if the policy changed mid-operation. On mismatch the affected accounts return "index rebuilding under updated security rules" instead of content; unaffected accounts stay available. The rebuild writes a **new** generation (separate database file) and publishes it atomically on success. A failed or offline rebuild never reactivates the old generation. Cost: after a rule change, affected accounts are unsearchable until the rebuild completes (hours for large mailboxes). That is the price of stricter rules taking effect immediately.
+- Estimated size: ~0.5–2 GB for ~100k messages (estimate; `doctor` reports a projection before first sync).
+- Optional scope limits: per-account, per-folder, "last N years".
+
+### 4.3 Sync policy (no timers, no background schedule)
+Sync uses **zero AI tokens** (plain IMAP + Python), but runs only when triggered by a search:
+
+| Condition at search time | Behavior |
+|---|---|
+| Last sync < 5 min (`sync_if_older_than`, configurable) | Search immediately. No sync. |
+| 5–10 min | Search immediately; start sync in background (non-blocking). |
+| > 10 min (2× interval) — "first search after a break" | Start sync, wait silently up to 2 s. If still running, send MCP progress notification: *"Syncing new mail (first search after a break; later searches are instant)…"*. At 10 s stop waiting: *"Continuing with unsynced data; newest mail will appear in your next search."* Sync continues in background. |
+| Last **successful** sync > 10 min and sync failed/offline | Results prefixed with one-line staleness warning per account. |
+
+Notes: accounts sync in parallel; at most one sync at a time; progress notifications render only in clients that support them (final result always carries the note). The server cannot detect "new chat," so "after a break" is defined by index age.
+
+Initial sync for a large mailbox may take hours; run explicitly via `readonly-safe-mail-mcp sync` (shows progress). Incremental thereafter via UIDNEXT/UIDVALIDITY.
+
+### 4.4 IMAP layer
+- Narrow internal methods only: `fetch_headers`, `fetch_structure` (BODYSTRUCTURE), `fetch_text_part(part)`, `fetch_approved_attachment(approval)`. Each builds its own command; none accepts a raw command or fetch expression. Whole-message fetches (`BODY.PEEK[]`, `RFC822`) do not exist in the code.
+- Sync fetches BODYSTRUCTURE first, then only `text/plain` and `text/html` body parts under a size cap. Attachment parts, inline attachments, and nested `message/rfc822` parts are indexed as metadata only and never fetched during sync.
+- TLS: `ssl.create_default_context()` with hostname checking; no STARTTLS downgrade; credentials are never sent before verification succeeds. (Python's `imaplib.IMAP4_SSL` default context does **not** verify certificates; see §10.)
+- Connection and per-command timeouts on every operation.
+- Logs and exceptions never contain raw messages, attachment bytes, authentication exchanges, or redacted secrets.
+- Limits enforced while fetching and decoding, not after: message size, MIME nesting depth, per-part bytes, concurrent requests. Advertised sizes are advisory; actual byte counts are enforced. A rejected item reports which limit it exceeded; other messages remain usable.
+- Tests assert the exact command strings sent over a fake connection, including rejection of injected command fragments and invalid part identifiers.
+
+## 5. Accounts and rules
+
+`~/.config/readonly-safe-mail-mcp/accounts.yaml` (never committed):
+
+```yaml
+accounts:
+  icloud: { preset: icloud, username: you@icloud.com }
+  gmail:  { preset: gmail,  username: you@gmail.com }
+  other:  { host: imap.example.com, port: 993, username: you@example.com }
+folders: { allow: ["*"], deny: [Junk, Trash, "Deleted Messages", Drafts] }
+sync_if_older_than: 5m
+attachments: ask        # ask | never
+```
+
+- Presets: iCloud, Gmail (app password + 2FA), Fastmail, Yahoo.
+- Passwords via OS keyring (`keyring`: macOS Keychain / Windows Credential Manager / Linux Secret Service). `set-password <account>` CLI. Env-var fallback documented with plaintext warning.
+- **Rule layering (fail-closed):** packaged generic defaults → user `rules.yaml` → per-account rules. Lists are **unioned**; user files can only add protection. Removing a default requires explicit `disable_default_keywords: [...]` and logs a warning. Unknown keys are a hard error.
+- **No personal data in the repo:** only generic defaults ship. CI blocks committed `*.local.yaml`, non-example email addresses, and `accounts.yaml`.
+
+## 6. MCP tools (kept few, with short descriptions, to save tokens)
+
+| Tool | Purpose | Output (compact by design) |
+|---|---|---|
+| `list_accounts` | Accounts, last sync time, message counts | one line per account |
+| `search` | FTS query (AND/OR/phrases) + filters: from, to, date range, account, folder; paging | one line per hit: id, account, date, from, subject, ~150-char snippet around match; default 20 |
+| `find_passages` | Return only matching paragraphs within given message ids | paragraphs only, not whole emails |
+| `read_message` | Full sanitized body of one message | quoted replies removed, capped |
+| `get_thread` | Conversation around a message | de-duplicated, quotes removed |
+| `request_attachments` | Ask human to approve opening 1+ attachments | see §7 |
+
+All tools: MCP `readOnlyHint=true`, `destructiveHint=false`. Results carry an "untrusted third-party content" marker.
+
+Token-efficiency principles: snippets not bodies, paging not dumps, quote-stripping at index time, `find_passages` to avoid reading whole messages, minimal tool descriptions (they're sent every turn).
+
+## 7. Attachments
+
+Never downloaded or stored by default; only sanitized metadata (filename, type, size, part id) is indexed. Supported formats in v1: PDF, DOCX, TXT/CSV/HTML. Images, archives, and executables are refused.
+
+### 7.1 Approval
+- `request_attachments([{message_id, part}...])` shows **the human** a batched table (account, date, from, subject, filename, size) with per-item checkboxes → Approve selected / Deny.
+- **Default channel: a server-owned native dialog** (macOS `osascript` with values passed as arguments, never interpolated into script text; Windows and Linux equivalents). **MCP elicitation** is used only for clients the user lists as trusted in config, because an elicitation response is the client's report of a decision, not independent proof of one. If no channel is available: refuse.
+- Each pending approval is bound to account, folder, UIDVALIDITY, UID, part id, and an expiring request id. Approval is consumed once. If the mailbox generation changed or the item no longer matches, the fetch is refused and fresh approval is required.
+- Denial, cancellation, malformed responses, and timeouts never authorize a fetch.
+
+### 7.2 Extraction worker
+After approval the main server fetches that one part into memory and hands the bytes to a short-lived worker process that, before parsing, has:
+- no network access and no inherited sockets or mail connections;
+- no credentials in its environment and no access to the keyring or config directory;
+- filesystem access limited to the interpreter/parser files and the supplied bytes;
+- limits on memory, CPU time, pages, decompressed bytes, and output size, enforced during decoding, not after.
+
+The worker exits after one request; timeout or cancellation kills it. The parent runs the extracted text through the sanitizer (§4.1) before returning it. Platform mechanisms: macOS `sandbox-exec` profile; Linux namespaces/seccomp via `bwrap` or `unshare` when present; Windows restricted token + job object. **Where the strong mechanism is unavailable, attachment opening is refused** (config `attachments: ask-unsandboxed` can override, with a warning). A timeout alone is never described as a sandbox. The package ships and tests these restrictions; users configure nothing.
+
+## 8. Install & client support
+
+README opens with install. Example (GitHub-pinned; PyPI form shown once published):
+
+```sh
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp set-password icloud
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp doctor
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp sync
+```
+
+Copy-paste configs for: Claude Desktop (`claude_desktop_config.json`, `mcpServers`), Claude Code (`claude mcp add`), Cursor (`~/.cursor/mcp.json`), VS Code (`.vscode/mcp.json`, `servers`), generic stdio.
+
+CLI subcommands: `set-password`, `doctor` (test login, show one sanitized sample, project index size), `sync`, `print-rules` (effective merged rules).
+
+## 9. Repo, CI, and review hygiene
+
+- License: **MIT**. Fresh public history (prototype had none).
+- `THREAT_MODEL.md` (expanded §3), `SECURITY.md` + GitHub private vulnerability reporting, `CONTRIBUTING.md`, "filter bypass" issue template (requires de-personalized sample).
+- CI: actions pinned to commit SHAs; matrix Python 3.11–3.13 × Linux/macOS/Windows; `ruff`; CodeQL; Dependabot; IMAP-allowlist test; adversarial filter tests (zero-width, homoglyph, bare domains, lowercase tokens, hidden HTML, quoted-printable splits); personal-data guard.
+- Branch protection on `main`.
+- Acceptance tests required before the first public release: approved extraction of every supported format; denied/cancelled/expired/replayed/mismatched approvals; sync issues no whole-message or attachment fetches (asserted on the wire); worker attempts to reach network, credentials, and unrelated files are blocked; encoded keywords (`pass&#x200B;word`), malformed MIME, and sanitizer failures all withhold; policy change during search/read and failed rebuilds; invalid TLS certificate blocks login before credentials are sent; oversized and compressed inputs fail within limits.
+
+## 10. Issues found in the prototype (fixed by this plan)
+
+1. **Search oracle:** live IMAP `TEXT` search ran over raw bodies, letting a prompt-injected AI reconstruct a withheld code via ~60 substring searches. → Fixed by searching only the sanitized index.
+2. `ALNUM_CODE_RE` matched uppercase only; lowercase reset tokens leaked. Bare domains without scheme/`www.` leaked.
+3. No Unicode normalization; zero-width chars defeated keyword rules.
+4. CI grep guard trivially bypassable (`getattr`). → Runtime command allowlist.
+5. No IMAP timeouts; From/To display names unsanitized; hidden HTML text passed through.
+6. Rules path only worked from a git checkout; password retrieval macOS-only.
+7. **TLS not verified.** `imaplib.IMAP4_SSL(HOST, PORT)` with no `ssl_context` uses Python's unverified stdlib context (confirmed on Python 3.11.6: `ssl._create_stdlib_context is ssl._create_unverified_context`). The prototype would accept a forged certificate and send the app password to an on-path attacker. → Fixed by §4.4.
+
+## 11. Decisions
+
+- Name `readonly-safe-mail-mcp`; rename existing private repo `pkellner/icloud-readonly-safe-mcp` (GitHub redirects old URL).
+- License MIT.
+- Local sanitized index is the primary search path; no live IMAP search tool exposed.
+- Search-triggered sync only (5 min interval; first search after a break waits silently 2 s, shows progress to 10 s, then continues with unsynced data). No timers.
+- Attachments opened only with human approval.
+- **PyPI:** upload a placeholder `0.0.1` early to reserve the name (README: "under review, not ready for use"). During review, real installs use GitHub-pinned tags; full PyPI releases begin at 1.0 via GitHub Actions trusted publishing. Note: PyPI is public and searchable; a placeholder is the only form of name reservation.
+
+## 12. Review log and open questions
+
+**Round 1 (external design review): all nine recommendations adopted.** Guarantee wording (§1), narrow IMAP methods (§4.4), concrete worker isolation (§7.2), bound single-use approvals with native dialog default (§7.1), decode-before-normalize pipeline (§4.1), policy generations (§4.2), TLS/storage/logging defaults (§4.2, §4.4), resource bounds (§4.4, §7.2), acceptance tests (§9). One qualification: where a platform lacks a strong isolation mechanism, attachment opening fails closed rather than shipping a weaker "sandbox".
+
+**Still open for reviewers:**
+1. Can you get a reset link, code, or token past the sanitizer? Test cases welcome.
+2. Should the index be encrypted (SQLCipher) beyond full-disk encryption?
+3. Is fail-closed on unsandboxed platforms (§7.2) the right call, or should Windows get a weaker-but-present worker?
+4. Any way a user config could weaken defaults silently (§5)?
+
+## 13. Build order
+
+1. Rename repo; restructure into package (accounts, rules layering, keyring).
+2. Read-only IMAP layer (§4.4: narrow methods, verified TLS, limits); sanitizer pipeline (§4.1) + adversarial tests.
+3. Sanitized SQLite/FTS5 index with policy generations; initial + incremental sync; search-triggered sync policy.
+4. MCP tools (§6) with compact outputs.
+5. Attachment approval + isolated extraction worker (§7), per platform.
+6. README (install first), threat model, security docs; CI.
+7. Owner runs `doctor` + first sync on real accounts.
+8. Repo goes public. PyPI per open decision.
