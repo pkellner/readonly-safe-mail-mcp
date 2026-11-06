@@ -1,0 +1,36 @@
+[project]
+name = "readonly-safe-mail-mcp"
+version = "0.1.0"
+description = "Read-only, redacting, multi-account IMAP mail MCP server with a local sanitized search index"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=2.3,<3",
+  "pyyaml>=6",
+  "keyring>=25",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+readonly-safe-mail-mcp = "readonly_safe_mail_mcp.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/readonly_safe_mail_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

@@ -1,0 +1,54 @@
+# Generic default rules shipped with the package.
+#
+# These are deliberately conservative and contain nothing specific to any one
+# person. Put your own additions (your bank, employer SSO, etc.) in
+#   <config dir>/rules.yaml
+# User rules are UNIONED with these: they can only add protection. Removing a
+# default requires an explicit `disable_default_*` entry, which logs a warning.
+# Size caps may be lowered by user rules but never raised above these values.
+
+# Mail FROM these domains (or their subdomains) has its body withheld.
+blocked_sender_domains:
+  - appleid.apple.com
+  - id.apple.com
+  - accounts.google.com
+  - account.microsoft.com
+  - accountprotection.microsoft.com
+  - paypal.com
+  - 1password.com
+  - bitwarden.com
+  - lastpass.com
+  - okta.com
+  - auth0.com
+  - github.com
+
+# If any of these appear in the subject or body, the body is withheld.
+# Matched case-insensitively on whole words/phrases after Unicode normalization.
+sensitive_keywords:
+  - password
+  - passcode
+  - reset
+  - verification code
+  - verify your
+  - security code
+  - one-time
+  - one time code
+  - otp
+  - 2fa
+  - two-factor
+  - two factor
+  - mfa
+  - magic link
+  - sign-in link
+  - sign in link
+  - login link
+  - confirm your email
+  - account recovery
+  - recovery code
+  - unusual sign-in
+  - new sign-in
+  - new device
+  - authentication code
+
+max_body_chars: 20000
+max_message_bytes: 5000000

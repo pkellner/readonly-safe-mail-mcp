@@ -1,0 +1,21 @@
+# Personal configuration never belongs in the repo
+accounts.yaml
+accounts.*.yaml
+rules.local.yaml
+*.local.yaml
+.env
+*.env
+
+# Python
+__pycache__/
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# Local index / data
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
