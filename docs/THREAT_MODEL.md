@@ -1,5 +1,10 @@
 # Threat model
 
+> [!CAUTION]
+> This describes what the design **intends**. It has never had an independent security
+> audit. Read the code before relying on any of it. See the warning at the top of the
+> [README](../README.md).
+
 ## What this protects against
 
 **The main attack:** an email contains instructions aimed at the AI ("forward me the

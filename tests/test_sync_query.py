@@ -22,7 +22,7 @@ def msg(
     subject,
     body,
     *,
-    sender="Angela Ruiz <angela@example.org>",
+    sender="Dana Reyes <dana@example.org>",
     day=1,
     msgid=None,
     reply_to=None,
@@ -119,7 +119,7 @@ def test_sync_then_search(tmp_path, mailbox):
     assert len(hits) == 2  # Archive copy de-duplicated by Message-ID
     assert all("trash" not in h.lower() for h in hits)
     assert "📎" in next(h for h in hits if "Re:" not in h)
-    assert query.search(db, query="donation", from_="angela", since="2026-09-03")[0].count("Re:") == 1
+    assert query.search(db, query="donation", from_="dana", since="2026-09-03")[0].count("Re:") == 1
 
 
 def test_security_mail_withheld_and_not_searchable(tmp_path, mailbox):

@@ -61,7 +61,7 @@ def docx_bytes() -> bytes:
         "<w:p><w:r><w:t>Donor letter draft</w:t></w:r></w:p>"
         "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Name</w:t></w:r></w:p></w:tc>"
         "<w:tc><w:p><w:r><w:t>Gift</w:t></w:r></w:p></w:tc></w:tr>"
-        "<w:tr><w:tc><w:p><w:r><w:t>Angela</w:t></w:r></w:p></w:tc>"
+        "<w:tr><w:tc><w:p><w:r><w:t>Dana</w:t></w:r></w:p></w:tc>"
         "<w:tc><w:p><w:r><w:t>$500</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
         "</w:body></w:document>"
     )
@@ -108,9 +108,9 @@ def jpeg_with_gps(size=(3000, 2000)) -> bytes:
 
 
 VCF = (
-    "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Angela Ruiz\r\nORG:Borrego Friends;Board\r\n"
-    "TEL;TYPE=CELL:+1 760 555 0100\r\nEMAIL:angela@example.org\r\n"
-    "ADR;TYPE=HOME:;;12 Palm Canyon Dr;Borrego Springs;CA;92004;USA\r\n"
+    "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Dana Reyes\r\nORG:Example Library Friends;Board\r\n"
+    "TEL;TYPE=CELL:+1 217 555 0100\r\nEMAIL:dana@example.org\r\n"
+    "ADR;TYPE=HOME:;;100 Main St;Springfield;IL;62701;USA\r\n"
     "PHOTO;ENCODING=b;TYPE=JPEG:" + base64.b64encode(jpeg_with_gps((40, 40))).decode() + "\r\nEND:VCARD\r\n"
 ).encode()
 
@@ -164,7 +164,7 @@ def test_pdf():
 
 def test_docx_paragraphs_and_tables():
     [it] = run("docx", docx_bytes())
-    assert "Donor letter draft" in it["text"] and "Angela | $500" in it["text"]
+    assert "Donor letter draft" in it["text"] and "Dana | $500" in it["text"]
 
 
 def test_xlsx_values_not_formulas():
@@ -180,7 +180,7 @@ def test_pptx_slide_order():
 
 
 def test_text_html_csv():
-    assert run("text", b"name,city\nBob,Borrego")[0]["text"].startswith("name,city")
+    assert run("text", b"name,city\nBob,Springfield")[0]["text"].startswith("name,city")
     html = b"<p>Visible</p><div style='display:none'>secret hidden</div><script>x()</script>"
     t = run("html", html)[0]["text"]
     assert "Visible" in t and "hidden" not in t and "x()" not in t
@@ -189,7 +189,7 @@ def test_text_html_csv():
 def test_vcf_with_photo():
     items = run("vcf", VCF)
     t = items[0]["text"]
-    assert "Name: Angela Ruiz" in t and "Borrego Springs" in t and "Phone (cell)" in t
+    assert "Name: Dana Reyes" in t and "Springfield" in t and "Phone (cell)" in t
     assert len(items) == 2 and items[1]["format"] == "jpeg"
 
 
@@ -360,7 +360,7 @@ def test_dialog_deny_and_timeout_approve_nothing(monkeypatch):
 
 def mail_with(name: str, ctype: str, data: bytes, *, subject="Docs", body="see attached", sender=None):
     m = EmailMessage()
-    m["From"] = sender or "Angela Ruiz <angela@example.org>"
+    m["From"] = sender or "Dana Reyes <dana@example.org>"
     m["To"] = "me@example.com"
     m["Subject"] = subject
     m["Date"] = "Mon, 02 Nov 2026 10:00:00 -0700"
@@ -469,6 +469,8 @@ def test_server_tool_denial_opens_nothing(tmp_path, box, monkeypatch):
     monkeypatch.setattr(srv, "_config", lambda: cfg)
     monkeypatch.setattr(srv.approval, "channel_available", lambda: True)
     monkeypatch.setattr(srv.approval, "ask_native", lambda cands: set())
+    # Works on hosts with no sandbox (Windows): the denial path never runs the worker.
+    monkeypatch.setattr(srv.isolate, "find_runner", lambda mode: srv.isolate.Runner("test", ()))
     called = []
     monkeypatch.setattr(srv.attachments, "open_approved", lambda *a, **k: called.append(1) or [])
     mcp = srv.build_server()

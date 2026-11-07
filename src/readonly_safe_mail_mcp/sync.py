@@ -51,13 +51,24 @@ def sync_lock(cfg: Config):
     with open(path, "a+") as fh:
         try:
             import fcntl
+        except ImportError:  # Windows
+            import msvcrt
 
+            fh.seek(0)
             try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
                 raise SyncBusy("another sync is already running") from None
-        except ImportError:  # Windows: no cross-process lock; WAL still keeps the db consistent
-            pass
+            try:
+                yield
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SyncBusy("another sync is already running") from None
         yield
 
 

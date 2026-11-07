@@ -52,7 +52,7 @@ class NoApprovalChannel(RuntimeError):
 
 @dataclass(frozen=True)
 class Candidate:
-    label: str  # e.g. "2026-11-04 · Angela Ruiz · Budget draft · budget.pdf (120 KB)"
+    label: str  # e.g. "2026-11-04 · Dana Reyes · Budget draft · budget.pdf (120 KB)"
     image: bool = False
 
 

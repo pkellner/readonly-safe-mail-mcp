@@ -14,8 +14,25 @@ without handing it the password-reset links and login codes that sit in every in
   then read inside a sandbox with no network or file access, and its text is redacted
   the same way.
 
-> **Status: pre-release (0.2).** Used daily by the author against iCloud. Read
-> [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) before trusting it with your mail.
+> [!CAUTION]
+> **THIS SOFTWARE HAS NEVER HAD AN INDEPENDENT SECURITY AUDIT.**
+>
+> It is a personal project, written with heavy help from an AI coding assistant and
+> reviewed only by its author. The protections described below are design goals, and
+> nobody independent has checked that they hold. Bugs in the redaction, the read-only
+> layer, or the attachment sandbox could expose password-reset links, login codes, or
+> other sensitive mail to an AI assistant, and through it to anyone who can
+> prompt-inject that assistant with an email.
+>
+> **Use it only if you have read the code yourself, understand what it does, and
+> accept the risk.** It is provided as-is, with no warranty (see [LICENSE](LICENSE)).
+> Do not use it for mail that someone else depends on you to protect.
+>
+> Only iCloud on macOS has been tested against real mail. Gmail, other providers,
+> Linux, and Windows are untested.
+
+> **Status: pre-release (0.2).** Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
+> before trusting it with your mail.
 
 ## Install
 
@@ -83,8 +100,8 @@ claude mcp add --scope user readonly-safe-mail -- readonly-safe-mail-mcp serve
 
 Any other MCP client: run `readonly-safe-mail-mcp serve` over stdio.
 
-Then ask things like *"look through all my email for the donor letter feedback from this
-week"* or *"what did Roger say about the time trial?"*
+Then ask things like *"find the emails about the roof repair quote from this week"* or
+*"what did the school say about the field trip?"*
 
 ## Tools the assistant gets
 

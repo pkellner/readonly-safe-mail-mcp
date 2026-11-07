@@ -164,8 +164,8 @@ def test_fetch_message_wire_sequence_never_touches_attachments():
             assert info.uidvalidity == 42
             assert src.search_uids() == [1]
             fm = src.fetch_message(1)
-    assert server.commands == [
-        "CAPABILITY",
+    # Newer imaplib releases reuse the greeting's capabilities and skip CAPABILITY.
+    assert [c for c in server.commands if c != "CAPABILITY"] == [
         "LOGIN me@example.com ***",
         'LIST "" *',
         'EXAMINE "INBOX"',
