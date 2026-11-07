@@ -31,15 +31,33 @@ without handing it the password-reset links and login codes that sit in every in
 > Only iCloud on macOS has been tested against real mail. Gmail, other providers,
 > Linux, and Windows are untested.
 
+## Quick install (Mac, one iCloud account)
+
+Open **Terminal** (Applications → Utilities) and paste:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/pkellner/readonly-safe-mail-mcp/main/install.sh)"
+```
+
+It asks for your iCloud address, opens Apple's page so you can make an app-specific
+password, and does the rest: installs Python and the tool, stores the password in your
+Keychain, tests a read-only login, connects Claude Code and Claude Desktop (whichever you
+have), and starts the first sync. You don't need Python, Homebrew, git, or Xcode, and it
+doesn't touch the Mac's system files. Running it again is safe.
+
+Then ask Claude about your email. Want to see what it does first? Read
+[install.sh](install.sh). Everything below is optional detail.
+
 > **Status: pre-release (0.2).** Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
 > before trusting it with your mail.
 
 ## Install
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+uv fetches Python 3.11+ itself if you don't have it, and git isn't needed.
 
 ```sh
-uv tool install git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0
+uv tool install --python 3.13 https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v0.2.0.tar.gz
 ```
 
 ### 1. Create an app-specific password
