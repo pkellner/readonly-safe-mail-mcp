@@ -43,7 +43,24 @@ It asks for your iCloud address, opens Apple's page so you can make an app-speci
 password, and does the rest: installs Python and the tool, stores the password in your
 Keychain, tests a read-only login, connects Claude Code and Claude Desktop (whichever you
 have), and starts the first sync. You don't need Python, Homebrew, git, or Xcode, and it
-doesn't touch the Mac's system files. Running it again is safe.
+doesn't touch the Mac's system files or your shell settings.
+
+**Made a mistake, or want to change something?** Paste the same command again. It shows
+your current setup and asks what you want: keep it (re-test and reconnect), change the
+email address, enter a new password, or start over from scratch.
+
+**Uninstall.** Paste this into Terminal:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/pkellner/readonly-safe-mail-mcp/main/uninstall.sh)"
+```
+
+It lists what it found and asks once, then removes all of it: the tool, its settings, the
+saved password in your Keychain, all downloaded mail, and the connections in Claude Code,
+Claude Desktop and Codex (other servers there are left alone). It asks separately before
+removing uv. Your mail on iCloud is never touched. Afterwards, revoke the app-specific
+password at [account.apple.com](https://account.apple.com) → Sign-In and Security →
+App-Specific Passwords.
 
 Then ask Claude about your email. Want to see what it does first? Read
 [install.sh](install.sh). Everything below is optional detail.
@@ -207,7 +224,8 @@ served again.
   attachment contents. Roughly 4–5 KB per message.
 - Keep it out of iCloud Drive, Dropbox, Desktop, and Documents. `sync` refuses folders that
   look cloud-synced.
-- To delete everything, remove that folder. The next sync rebuilds it.
+- To delete only the downloaded mail, remove that folder; the next sync rebuilds it. To
+  remove everything, run the uninstall command under [Quick install](#quick-install-mac-one-icloud-account).
 
 ## Security in one paragraph
 

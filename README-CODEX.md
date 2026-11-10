@@ -14,7 +14,7 @@
    [Apple's account page](https://account.apple.com/), choose **Sign-In and Security
    → App-Specific Passwords → Generate**, name it **Mail MCP**, and paste the
    generated password into **Terminal**, never into chat. Apple requires
-   two-factor authentication. Let the mail sync run; “No Claude app found” is OK.
+   two-factor authentication. Let the mail sync run; “No Claude app was found” is OK.
 4. **Paste this into local Codex:**
 
    > Connect my installed readonly-safe-mail-mcp server to Codex. Find its absolute
@@ -122,7 +122,7 @@ entire mailbox finishes. A large mailbox can take hours.
 You can leave Terminal running while you do the next step. If you need to stop
 the sync, press **Control-C**; progress is retained and syncing can resume later.
 
-You may see **“No Claude app found”**. That's expected if you don't use Claude.
+You may see **“No Claude app was found”**. That's expected if you don't use Claude.
 The installer currently connects Claude automatically; we'll connect Codex in
 the next step. You do not need to install Claude.
 
@@ -233,10 +233,19 @@ See [OpenAI's MCP documentation](https://developers.openai.com/codex/mcp).
 - **Older messages are missing:** let the first sync finish. Run
   `~/.local/bin/readonly-safe-mail-mcp status` to see progress, or
   `~/.local/bin/readonly-safe-mail-mcp sync` to resume a stopped sync.
-- **You want to disconnect:** revoke the **iCloud Mail MCP** app-specific
-  password at Apple's website to stop future iCloud access. This does not erase
-  the existing local index. Remove the MCP entry from Codex to disconnect its
-  access to that index; see the main README for data locations.
+- **You typed something wrong in the installer:** run the install command again.
+  It shows your current setup and lets you change the email address, enter a new
+  password, or start over.
+- **You want to remove it:** run this in Terminal. It removes the tool, its
+  settings, the saved password, all downloaded mail, and the Codex entry (your
+  other Codex settings are kept), then tells you what it did:
+
+  ```sh
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/pkellner/readonly-safe-mail-mcp/main/uninstall.sh)"
+  ```
+
+  Then revoke the **iCloud Mail MCP** app-specific password at Apple's website
+  and restart Codex.
 
 ## Limits of this setup
 
