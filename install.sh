@@ -56,8 +56,16 @@ BIN="$(uv tool dir --bin)/$NAME"
 if [ -f "$CONFIG_DIR/accounts.yaml" ]; then
   say "Keeping your existing $CONFIG_DIR/accounts.yaml"
 else
-  email="$(ask 'Your iCloud email address (e.g. you@icloud.com): ')"
-  case "$email" in *@*.*) ;; *) fail "that doesn't look like an email address." ;; esac
+  while :; do
+    email="$(ask 'Your iCloud email address (e.g. you@icloud.com): ')"
+    email="${email#"${email%%[![:space:]]*}"}"  # trim leading whitespace
+    email="${email%"${email##*[![:space:]]}"}"  # trim trailing whitespace
+    case "$email" in
+      *[[:space:]\"\\]*) ;;
+      ?*@?*.?*) break ;;
+    esac
+    echo "That doesn't look like an email address. Please try again."
+  done
   mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
   (umask 077; printf 'accounts:\n  icloud: { preset: icloud, username: "%s" }\n' "$email" \
     > "$CONFIG_DIR/accounts.yaml")
@@ -72,7 +80,12 @@ Name it "mail mcp" and copy the password it shows (xxxx-xxxx-xxxx-xxxx).
 EOF
 ask 'Press Return to open the page... ' >/dev/null
 open "https://account.apple.com/account/manage" || true
-"$BIN" set-password icloud </dev/tty
+tries=0
+until "$BIN" set-password icloud </dev/tty; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 3 ] || fail "no password stored. Run this installer again when you have it."
+  echo "Let's try that again."
+done
 
 # 5. test
 say "Testing a read-only login"
