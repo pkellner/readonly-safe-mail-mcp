@@ -96,6 +96,10 @@ the background when you search, and only fetches what's new.
 
 ### 4. Connect your AI client
 
+**Codex (OpenAI)**: see [Install with Codex on a Mac](README-CODEX.md) for a
+step-by-step iCloud setup guide and a ready-to-send email for a friend, including
+Apple app-specific password instructions.
+
 **Claude Code**
 
 ```sh
