@@ -25,8 +25,10 @@ log = logging.getLogger(__name__)
 
 CHUNK = 100
 # iCloud serves message bodies slowly per connection (~10 s per 100 messages) but in
-# parallel well: 4 connections measured ~2.8x faster on 2026-11-06.
-CONNECTIONS = 4
+# parallel well: 4 connections measured ~2.8x faster on 2026-11-06. Reduced to 2 after
+# iCloud began refusing logins ("[UNAVAILABLE] Service temporarily unavailable") for days
+# following a full sync at 4; gentler on the account at some cost in speed.
+CONNECTIONS = 2
 ProgressFn = Callable[[str, str, int, int], None]  # account, folder, done, total
 
 
