@@ -56,7 +56,7 @@ BIN="$(uv tool dir --bin)/$NAME"
 if [ -f "$CONFIG_DIR/accounts.yaml" ]; then
   say "Keeping your existing $CONFIG_DIR/accounts.yaml"
 else
-  email="$(ask 'Your iCloud email address (e.g. name@icloud.com): ')"
+  email="$(ask 'Your iCloud email address (e.g. you@icloud.com): ')"
   case "$email" in *@*.*) ;; *) fail "that doesn't look like an email address." ;; esac
   mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
   (umask 077; printf 'accounts:\n  icloud: { preset: icloud, username: "%s" }\n' "$email" \
