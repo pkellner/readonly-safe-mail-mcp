@@ -197,9 +197,9 @@ All parsing and decoding happens inside the §7.2 worker.
 README opens with install. Example (GitHub-pinned; PyPI form shown once published):
 
 ```sh
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp set-password icloud
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp check
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.0 readonly-safe-mail-mcp sync
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.1 readonly-safe-mail-mcp set-password icloud
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.1 readonly-safe-mail-mcp check
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.1 readonly-safe-mail-mcp sync
 ```
 
 Copy-paste configs for: Claude Desktop (`claude_desktop_config.json`, `mcpServers`), Claude Code (`claude mcp add`), Cursor (`~/.cursor/mcp.json`), VS Code (`.vscode/mcp.json`, `servers`), generic stdio.
@@ -250,7 +250,7 @@ CLI subcommands: `set-password`, `delete-password`, `check` (test login, show on
 
 1. ✅ Rename repo; restructure into package (accounts, rules layering, keyring).
 2. ✅ Read-only IMAP layer (§4.4: narrow methods, verified TLS, limits); sanitizer pipeline (§4.1) + adversarial tests.
-3. ✅ Sanitized SQLite/FTS5 index with policy generations; initial + incremental sync (parallel fetch, resumable); search-triggered sync policy.
+3. ✅ Sanitized SQLite/FTS5 index with policy generations; initial + incremental sync (parallel fetch over 2 connections plus a control connection, resumable); search-triggered sync policy.
 4. ✅ MCP tools (§6) with compact outputs.
 5. ✅ Attachment approval + isolated extraction worker (§7): macOS done and live-tested; Linux `bwrap` untested; Windows refused.
 6. ✅ README (install first), THREAT_MODEL.md, SECURITY.md, CONTRIBUTING.md, filter-bypass issue template; CI (SHA-pinned, 3 OS × 3 Python), CodeQL, Dependabot, personal-data guard; `file` credential backend and permission warnings in `check` (§3.1). CI first runs on push.

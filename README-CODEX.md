@@ -228,6 +228,11 @@ See [OpenAI's MCP documentation](https://developers.openai.com/codex/mcp).
 - **You changed your main Apple Account password:** Apple revokes existing
   app-specific passwords when the primary password changes or is reset. Generate
   a replacement and store it with `set-password icloud`.
+- **Login fails with `[UNAVAILABLE] Service temporarily unavailable`:** iCloud is
+  temporarily refusing this kind of login, usually after a lot of downloading. It is
+  not a password problem. Wait a few hours to a day, then test with
+  `~/.local/bin/readonly-safe-mail-mcp check`. Syncing resumes by itself once it
+  logs in again.
 - **Codex doesn't see the mail tools:** confirm this is a local task on the Mac
   where you installed the server, check the executable path, and restart the app.
 - **Older messages are missing:** let the first sync finish. Run

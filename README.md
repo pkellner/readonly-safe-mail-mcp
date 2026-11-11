@@ -74,7 +74,7 @@ Requires [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/inst
 uv fetches Python 3.11+ itself if you don't have it, and git isn't needed.
 
 ```sh
-uv tool install --python 3.13 https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v0.2.0.tar.gz
+uv tool install --python 3.13 https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v0.2.1.tar.gz
 ```
 
 ### 1. Create an app-specific password
@@ -107,9 +107,16 @@ readonly-safe-mail-mcp check                 # verified TLS login, one sanitized
 readonly-safe-mail-mcp sync                  # first sync: newest mail first, safe to stop and resume
 ```
 
-The first sync of a large mailbox takes a while (about 1,400 messages a minute with
-iCloud). Recent mail is searchable within minutes. After that, sync runs by itself in
-the background when you search, and only fetches what's new.
+The first sync of a large mailbox takes a while (expect a few hours for 100,000+
+messages with iCloud). Recent mail is searchable within minutes. After that, sync runs by
+itself in the background when you search, and only fetches what's new.
+
+Sync opens at most three connections to the mail server at a time: two that download in
+parallel and one that steps through folders. That keeps it well inside provider limits.
+If iCloud is pushed too hard it can refuse logins with
+`[UNAVAILABLE] Service temporarily unavailable` for a day or more. That is not a password
+problem. Run `check` to test the login at any time; if it shows that error, wait and try
+again later. Syncing resumes where it left off once iCloud accepts logins again.
 
 ### 4. Connect your AI client
 
@@ -211,7 +218,7 @@ served again.
 | `serve` | Run the MCP server over stdio (what your client launches) |
 | `set-password ACCOUNT [--store file]` | Store a password in the OS keyring (or a mode-600 file, for dedicated-user installs) |
 | `delete-password ACCOUNT` | Remove the stored password (also revoke it at the provider) |
-| `check` | Config, permissions, sandbox, and a read-only test login |
+| `check` | Config, permissions, sandbox, and a read-only test login (no sync) |
 | `sync [--account A]` | Sync now with progress (Ctrl-C to stop; resumes later) |
 | `status` | Offline: what's indexed and when it last synced |
 | `print-rules`, `paths` | Show effective rules and where files live |
