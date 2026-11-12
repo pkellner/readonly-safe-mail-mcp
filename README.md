@@ -223,6 +223,41 @@ served again.
 | `status` | Offline: what's indexed and when it last synced |
 | `print-rules`, `paths` | Show effective rules and where files live |
 
+### Shortcuts (optional, Mac)
+
+The Quick install does not put the program on your `PATH`, so the commands need the full
+path, for example `~/.local/bin/readonly-safe-mail-mcp status`. To type `mail-status`
+instead, copy all of the lines below, paste them into Terminal, press Return, then open a
+new Terminal window. They add shortcuts to your `~/.zshrc` file. The installer prints the
+same block at the end, with the exact path for your Mac.
+
+```sh
+cat >> ~/.zshrc <<'MAIL_SHORTCUTS'
+
+# readonly-safe-mail-mcp shortcuts
+alias mail-status='"$HOME/.local/bin/readonly-safe-mail-mcp" status'
+alias mail-check='"$HOME/.local/bin/readonly-safe-mail-mcp" check'
+alias mail-sync='"$HOME/.local/bin/readonly-safe-mail-mcp" sync'
+alias mail-rules='"$HOME/.local/bin/readonly-safe-mail-mcp" print-rules'
+alias mail-paths='"$HOME/.local/bin/readonly-safe-mail-mcp" paths'
+alias mail-set-password='"$HOME/.local/bin/readonly-safe-mail-mcp" set-password icloud'
+alias mail-delete-password='"$HOME/.local/bin/readonly-safe-mail-mcp" delete-password icloud'
+MAIL_SHORTCUTS
+```
+
+| Shortcut | Does |
+|---|---|
+| `mail-status` | Show download progress and what is indexed (offline) |
+| `mail-check` | Test the settings, the saved password and a read-only connection |
+| `mail-sync` | Download mail now |
+| `mail-rules` | Advanced:  show the rules in effect |
+| `mail-paths` | Advanced:  show where files are kept |
+| `mail-set-password` | Advanced:  replace the saved password |
+| `mail-delete-password` | Advanced:  remove the saved password |
+
+If your account is not named `icloud`, change that word in the last two lines. Pasting the
+block twice is harmless; it only repeats the lines in `~/.zshrc`.
+
 ## Where your data lives
 
 - Index: `~/Library/Application Support/readonly-safe-mail-mcp/` (macOS),
