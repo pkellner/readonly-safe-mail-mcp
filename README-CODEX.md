@@ -14,8 +14,10 @@
    [Apple's account page](https://account.apple.com/), choose **Sign-In and Security
    → App-Specific Passwords → Generate**, name it **Mail MCP**, and paste the
    generated password into **Terminal**, never into chat. Apple requires
-   two-factor authentication. Let the mail sync run; “No Claude app was found” is OK.
-4. **Paste this into local Codex:**
+   two-factor authentication. The installer connects Codex by itself when it finds
+   it (look for **“Codex: connected”**). Let the mail sync run.
+4. **Quit Codex, open it again and start a new local task.** If the installer did
+   not say “Codex: connected”, paste this into local Codex instead:
 
    > Connect my installed readonly-safe-mail-mcp server to Codex. Find its absolute
    > executable path and register it with the argument `serve`, preserving existing
@@ -122,11 +124,13 @@ entire mailbox finishes. A large mailbox can take hours.
 You can leave Terminal running while you do the next step. If you need to stop
 the sync, press **Control-C**; progress is retained and syncing can resume later.
 
-You may see **“No Claude app was found”**. That's expected if you don't use Claude.
-The installer currently connects Claude automatically; we'll connect Codex in
-the next step. You do not need to install Claude.
+In its last step the installer connects the apps it finds. Look for
+**“Codex: connected”**. If you see it, quit Codex, open it again, start a new
+local task, and skip to step 6. If you see **“Codex: not installed, skipped”** or
+a warning, connect it in the next step. “Claude Code: not installed, skipped” is
+expected if you don't use Claude; you do not need to install it.
 
-### 5. Ask Codex to connect the installed mail server
+### 5. Ask Codex to connect the installed mail server (only if the installer did not)
 
 Paste this into the local Codex task you opened in step 1:
 
@@ -181,8 +185,8 @@ Peter
 
 ## Reference: connect Codex manually
 
-These steps are an alternative to the connection prompt, after the mail installer
-has completed. They do not install the mail tool or configure the iCloud account.
+The installer does this for you when it finds Codex. These steps are an
+alternative, after the mail installer has completed. They do not install the mail tool or configure the iCloud account.
 
 If the `codex` command is installed, run these commands in Terminal:
 

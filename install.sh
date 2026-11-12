@@ -16,7 +16,7 @@
 #   4. Opens Apple's page to make an app-specific password, then stores it in your
 #      login Keychain. The password never touches disk or this script's variables.
 #   5. Runs a read-only test login (and helps you fix it if it fails).
-#   6. Connects Claude Code and/or Claude Desktop, whichever is installed.
+#   6. Connects Claude Code, Claude Desktop and Codex, whichever are installed.
 #   7. Starts the first sync (safe to stop with Ctrl-C; it resumes later).
 set -euo pipefail
 
@@ -32,6 +32,10 @@ ACCOUNTS="$CONFIG_DIR/accounts.yaml"
 UV_MARKER="$CONFIG_DIR/.installer-installed-uv"
 DESKTOP_DIR="$HOME/Library/Application Support/Claude"
 DESKTOP_CONFIG="$DESKTOP_DIR/claude_desktop_config.json"
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_CONFIG="$CODEX_DIR/config.toml"
+CODEX_SERVER="readonly_safe_mail"
+DOCS="https://github.com/pkellner/readonly-safe-mail-mcp/blob/main"
 INSTALL_CMD="/bin/bash -c \"\$(curl -fsSL $RAW/install.sh)\""
 UNINSTALL_CMD="/bin/bash -c \"\$(curl -fsSL $RAW/uninstall.sh)\""
 
@@ -348,8 +352,8 @@ done
 ok "Login works. Your mail was opened read-only."
 
 # ---------------------------------------------------------------- 6. connect Claude
-say "Step 6 of 6: connecting Claude"
-connected=""; restart=""
+say "Step 6 of 6: connecting Claude and Codex"
+connected=""; restart=""; codex_connected=""
 if command -v claude >/dev/null 2>&1; then
   claude mcp remove --scope user "$SERVER" >/dev/null 2>&1 || true
   if out="$(claude mcp add --scope user "$SERVER" -- "$BIN" serve 2>&1)"; then
@@ -387,6 +391,60 @@ PYEOF
 else
   note "Claude Desktop: not installed, skipped"
 fi
+# Codex (OpenAI). Its settings are global, so one entry serves every Codex session.
+# With the codex command, let it write its own settings. The desktop app alone has
+# no command, so the entry is written to config.toml: a backup is kept, other
+# settings are left as they are, and the result must still parse or nothing is written.
+codex_restart="quit Codex and open it again, then start a new task"
+if command -v codex >/dev/null 2>&1; then
+  codex mcp remove "$CODEX_SERVER" >/dev/null 2>&1 || true
+  if out="$(codex mcp add "$CODEX_SERVER" -- "$BIN" serve 2>&1)"; then
+    ok "Codex: connected"; connected=1; codex_connected=1
+    restart="${restart:+$restart; }$codex_restart"
+  else
+    warn "Codex: could not connect it automatically:"
+    printf '      %s\n' "$out"
+    warn "To do it by hand: codex mcp add $CODEX_SERVER -- \"$BIN\" serve"
+  fi
+elif [ -d "$CODEX_DIR" ]; then
+  if "$PY" -I - "$CODEX_CONFIG" "$CODEX_SERVER" "$BIN" 2>/dev/null <<'PYEOF'
+import json, os, re, shutil, sys, tomllib
+path, name, binary = sys.argv[1:]
+text = ""
+if os.path.exists(path):
+    with open(path) as f:
+        text = f.read()
+    tomllib.loads(text)  # not valid TOML: stop here and leave the file alone
+# Drop an earlier table for this server (and its sub-tables), keep everything else.
+table = re.compile(r"^\s*\[")
+ours = re.compile(r"^\s*\[\s*mcp_servers\.(?:%s|\"%s\")\s*(?:\.[^\]]*)?\]" % (name, name))
+kept, skipping = [], False
+for line in text.splitlines(keepends=True):
+    if table.match(line):
+        skipping = bool(ours.match(line))
+    if not skipping:
+        kept.append(line)
+new = "".join(kept).rstrip()
+if new:
+    new += "\n"
+new += "%s[mcp_servers.%s]\ncommand = %s\nargs = [\"serve\"]\n" % ("\n" if new else "", name, json.dumps(binary))
+got = tomllib.loads(new)["mcp_servers"][name]
+assert got == {"command": binary, "args": ["serve"]}, got
+if text:
+    shutil.copy2(path, path + ".bak")
+with open(path, "w") as f:
+    f.write(new)
+PYEOF
+  then
+    ok "Codex: connected"; connected=1; codex_connected=1
+    restart="${restart:+$restart; }$codex_restart"
+  else
+    warn "Codex: could not update $CODEX_CONFIG (left unchanged)."
+    warn "See README-CODEX.md to add the server by hand."
+  fi
+else
+  note "Codex: not installed, skipped"
+fi
 
 # ---------------------------------------------------------------- done + first sync
 say "All set"
@@ -398,12 +456,19 @@ if [ -n "$connected" ]; then
   printf '%s\n' "$restart" | tr ';' '\n' | sed 's/^ *//' | while IFS= read -r line; do
     printf '  - %s%s.\n' "$(printf '%s' "${line:0:1}" | tr '[:lower:]' '[:upper:]')" "${line:1}"
   done
-  printf 'Then ask Claude something like: "Find the emails about my upcoming trip."\n'
+  printf 'Then ask something like: "Find the emails about my upcoming trip."\n'
+  printf '\n%sSessions that were already open cannot see your mail until they are restarted.%s\n' "$B" "$N"
+  printf '  - Claude Code: type /exit, then run "claude --continue" in the same folder.\n'
+  printf '    The conversation comes back, now with mail. Every new session has it already.\n'
+  printf '  - Claude Desktop and Codex: quit the app and open it again.\n'
 else
-  printf '\n%sNo Claude app was found, so nothing was connected.%s\n' "$B" "$N"
-  printf '  - Using Codex? Follow README-CODEX.md: https://github.com/pkellner/readonly-safe-mail-mcp/blob/main/README-CODEX.md\n'
-  printf '  - Installing Claude later? Run the install command again and choose 1.\n'
+  printf '\n%sNo Claude or Codex app was found, so nothing was connected.%s\n' "$B" "$N"
+  printf '  - Installing one later? Run the install command again and choose 1.\n'
 fi
+printf '\n%sOther apps:%s\n' "$B" "$N"
+[ -n "$codex_connected" ] ||
+  printf '  - Codex (OpenAI), by hand: %s/README-CODEX.md\n' "$DOCS"
+printf '  - Cursor, VS Code or another app: %s/README.md#4-connect-your-ai-client\n' "$DOCS"
 # Commands are shown with the full path: this script does not put $BIN on the PATH.
 # With hand-edited settings the account name is not known here: the list shows a
 # placeholder, and the password shortcuts take the name when they are used.

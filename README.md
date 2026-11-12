@@ -41,8 +41,9 @@ Open **Terminal** (Applications → Utilities) and paste:
 
 It asks for your iCloud address, opens Apple's page so you can make an app-specific
 password, and does the rest: installs Python and the tool, stores the password in your
-Keychain, tests a read-only login, connects Claude Code and Claude Desktop (whichever you
-have), and starts the first sync. You don't need Python, Homebrew, git, or Xcode, and it
+Keychain, tests a read-only login, connects Claude Code, Claude Desktop and Codex
+(whichever you have), and starts the first sync. The connection covers every session
+of those apps on this Mac; ones that were already open need a restart to see it. You don't need Python, Homebrew, git, or Xcode, and it
 doesn't touch the Mac's system files or your shell settings.
 
 **Made a mistake, or want to change something?** Paste the same command again. It shows
@@ -120,8 +121,15 @@ again later. Syncing resumes where it left off once iCloud accepts logins again.
 
 ### 4. Connect your AI client
 
-**Codex (OpenAI)**: see [Install with Codex on a Mac](README-CODEX.md) for a
-step-by-step iCloud setup guide and a ready-to-send email for a friend, including
+**Codex (OpenAI)**: the Quick install connects Codex by itself when it finds it. By hand:
+
+```sh
+codex mcp add readonly_safe_mail -- "$HOME/.local/bin/readonly-safe-mail-mcp" serve
+```
+
+Codex keeps this in its global settings, so it covers every Codex session. Quit Codex
+and open it again, then start a new task. See [Install with Codex on a Mac](README-CODEX.md)
+for a step-by-step iCloud setup guide and a ready-to-send email for a friend, including
 Apple app-specific password instructions.
 
 **Claude Code**
@@ -133,8 +141,9 @@ claude mcp add --scope user readonly-safe-mail -- readonly-safe-mail-mcp serve
 - `--scope user` makes the server available to every Claude Code session on this
   computer. Without it the server is registered for the current project only, and
   sessions in other folders cannot search mail. Check with `claude mcp get readonly-safe-mail`.
-- Sessions that are already running pick it up after a restart. Other computers need
-  their own install and their own `claude mcp add`.
+- Sessions that are already running pick it up after a restart: type `/exit`, then run
+  `claude --continue` in the same folder to get the conversation back. Other computers
+  need their own install and their own `claude mcp add`.
 - If `readonly-safe-mail-mcp` is not on your `PATH`, give the full path, for example
   `~/.local/bin/readonly-safe-mail-mcp`.
 - With `--scope user`, every session in every folder can search your mail, including
