@@ -405,7 +405,10 @@ else
   printf '  - Installing Claude later? Run the install command again and choose 1.\n'
 fi
 # Commands are shown with the full path: this script does not put $BIN on the PATH.
-acct_arg="$ACCOUNT"; [ -z "$custom" ] || acct_arg="ACCOUNT"
+# With hand-edited settings the account name is not known here: the list shows a
+# placeholder, and the password shortcuts take the name when they are used.
+acct_arg="$ACCOUNT"; alias_acct=" $ACCOUNT"
+[ -z "$custom" ] || { acct_arg="ACCOUNT"; alias_acct=""; }
 cat <<EOF
 
 ${D}Change settings later:  run the install command again
@@ -418,8 +421,24 @@ Download mail now:      "$BIN" sync
 Advanced:  show the rules in effect:   "$BIN" print-rules
 Advanced:  show where files are kept:  "$BIN" paths
 Advanced:  replace the saved password: "$BIN" set-password $acct_arg
-Advanced:  remove the saved password:  "$BIN" delete-password $acct_arg${N}
+Advanced:  remove the saved password:  "$BIN" delete-password $acct_arg
 
+Optional shortcuts: to type mail-status instead of the long command, copy all of
+the lines below, paste them into Terminal, press Return, then open a new Terminal
+window. They add shortcuts to your ~/.zshrc file. This installer does not do it for you.
+
+cat >> ~/.zshrc <<'MAIL_SHORTCUTS'
+
+# $NAME shortcuts
+alias mail-status='"$BIN" status'
+alias mail-check='"$BIN" check'
+alias mail-sync='"$BIN" sync'
+alias mail-rules='"$BIN" print-rules'
+alias mail-paths='"$BIN" paths'
+alias mail-set-password='"$BIN" set-password$alias_acct'
+alias mail-delete-password='"$BIN" delete-password$alias_acct'
+MAIL_SHORTCUTS
+${N}
 ${B}Now downloading your mail for the first time.${N} Newest mail comes first, so recent
 mail is searchable within minutes; a big mailbox can take hours. You can press
 Ctrl-C at any time. It picks up where it left off, and it also keeps up to date by
