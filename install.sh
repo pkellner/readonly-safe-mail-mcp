@@ -404,10 +404,21 @@ else
   printf '  - Using Codex? Follow README-CODEX.md: https://github.com/pkellner/readonly-safe-mail-mcp/blob/main/README-CODEX.md\n'
   printf '  - Installing Claude later? Run the install command again and choose 1.\n'
 fi
+# Commands are shown with the full path: this script does not put $BIN on the PATH.
+acct_arg="$ACCOUNT"; [ -z "$custom" ] || acct_arg="ACCOUNT"
 cat <<EOF
 
 ${D}Change settings later:  run the install command again
-Remove everything:      $UNINSTALL_CMD${N}
+Remove everything:      $UNINSTALL_CMD
+
+See download progress:  "$BIN" status
+Test the connection:    "$BIN" check
+Download mail now:      "$BIN" sync
+
+Advanced:  show the rules in effect:   "$BIN" print-rules
+Advanced:  show where files are kept:  "$BIN" paths
+Advanced:  replace the saved password: "$BIN" set-password $acct_arg
+Advanced:  remove the saved password:  "$BIN" delete-password $acct_arg${N}
 
 ${B}Now downloading your mail for the first time.${N} Newest mail comes first, so recent
 mail is searchable within minutes; a big mailbox can take hours. You can press
@@ -429,3 +440,4 @@ elif [ "$sync_rc" -ne 0 ]; then
 else
   ok "Your mail is downloaded. From now on only new mail is fetched, when Claude searches."
 fi
+note "To see download progress at any time: \"$BIN\" status"
