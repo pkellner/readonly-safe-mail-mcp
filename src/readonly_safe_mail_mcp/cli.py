@@ -15,6 +15,7 @@ import argparse
 import getpass
 import logging
 import ssl
+import subprocess
 import sys
 
 import yaml
@@ -42,6 +43,33 @@ def _cmd_delete_password(args) -> int:
     return 0
 
 
+PBPASTE = "/usr/bin/pbpaste"
+PBCOPY = "/usr/bin/pbcopy"
+
+
+def _clipboard_text() -> str:
+    """One line of text from the macOS clipboard, trimmed. '' if there is none,
+    it spans several lines (not a password), or this is not a Mac."""
+    if sys.platform != "darwin":
+        return ""
+    try:
+        out = subprocess.run([PBPASTE], capture_output=True, timeout=5, check=True)
+        text = out.stdout.decode("utf-8").strip()
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return ""
+    if not text or any(c in text for c in "\r\n"):
+        return ""
+    return text
+
+
+def _clear_clipboard() -> bool:
+    try:
+        subprocess.run([PBCOPY], input=b"", timeout=5, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
 def _cmd_set_password(args) -> int:
     cfg = load_config()
     if args.account not in cfg.accounts:
@@ -54,12 +82,34 @@ def _cmd_set_password(args) -> int:
             file=sys.stderr,
         )
         return 2
-    pw = getpass.getpass(f"App-specific password for {cfg.accounts[args.account].username}: ")
+    who = cfg.accounts[args.account].username
+    pw, from_clipboard = "", False
+    clip = _clipboard_text()
+    if clip:
+        # The length is shown so the user can tell it is the password they just
+        # copied. The text itself is never printed.
+        print(f"Your clipboard holds {len(clip)} characters. How should the password for {who} be entered?")
+        print("  1) Use what is in the clipboard")
+        print("  2) Type or paste it myself")
+        choice = ""
+        while choice not in ("1", "2"):
+            try:
+                choice = input("Choose 1 or 2, then press Return: ").strip()
+            except EOFError:
+                print("\nNothing stored.", file=sys.stderr)
+                return 1
+        if choice == "1":
+            pw, from_clipboard = clip, True
+    if not pw:
+        print("Nothing appears on screen while you type or paste. That is normal. Press Return when done.")
+        pw = getpass.getpass(f"App-specific password for {who}: ")
     if not pw:
         print("Empty password; nothing stored.", file=sys.stderr)
         return 1
     where = credentials.set_password(args.account, pw, backend=args.store)
-    print(f"Stored password for account {args.account!r} in {where}.")
+    print(f"Stored password ({len(pw)} characters) for account {args.account!r} in {where}.")
+    if from_clipboard and _clear_clipboard():
+        print("Cleared the clipboard, so the password is not left there.")
     return 0
 
 

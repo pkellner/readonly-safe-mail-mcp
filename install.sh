@@ -288,8 +288,10 @@ You need an ${B}app-specific password${N} from Apple (not your regular Apple pas
   1. Your browser will open account.apple.com. Sign in.
   2. Go to Sign-In and Security -> App-Specific Passwords -> + (or Generate).
   3. Name it "mail mcp" and copy the password it shows. It looks like abcd-efgh-ijkl-mnop.
-  4. Come back to this window and paste it at the prompt.
-     ${B}Nothing appears on screen while you paste. That is normal.${N} Then press Return.
+  4. Come back to this window. It will find the password you copied and ask
+     whether to use it. Answer 1 and press Return.
+     If you would rather type or paste it yourself, answer 2.
+     ${B}Nothing appears on screen while you type or paste. That is normal.${N}
 EOF
   ask "Press Return to open Apple's page... "
   open "https://account.apple.com/account/manage" 2>/dev/null ||
@@ -301,7 +303,7 @@ EOF
       fail "no password was saved." \
         "When you have your app-specific password, run the install command again:" "$INSTALL_CMD"
     fi
-    warn "Let's try that again. Paste the password and press Return (it stays invisible)."
+    warn "Let's try that again. Copy the password from Apple's page first, or type it (it stays invisible)."
   done
   ok "Saved the password in your Keychain"
 }

@@ -216,7 +216,7 @@ served again.
 | Command | |
 |---|---|
 | `serve` | Run the MCP server over stdio (what your client launches) |
-| `set-password ACCOUNT [--store file]` | Store a password in the OS keyring (or a mode-600 file, for dedicated-user installs) |
+| `set-password ACCOUNT [--store file]` | Store a password in the OS keyring (or a mode-600 file, for dedicated-user installs). On a Mac it offers to use the clipboard, and always asks first |
 | `delete-password ACCOUNT` | Remove the stored password (also revoke it at the provider) |
 | `check` | Config, permissions, sandbox, and a read-only test login (no sync) |
 | `sync [--account A]` | Sync now with progress (Ctrl-C to stop; resumes later) |
