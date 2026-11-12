@@ -74,7 +74,7 @@ Requires [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/inst
 uv fetches Python 3.11+ itself if you don't have it, and git isn't needed.
 
 ```sh
-uv tool install --python 3.13 https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v0.2.1.tar.gz
+uv tool install --python 3.13 https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v0.2.2.tar.gz
 ```
 
 ### 1. Create an app-specific password
