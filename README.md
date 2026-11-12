@@ -130,6 +130,24 @@ Apple app-specific password instructions.
 claude mcp add --scope user readonly-safe-mail -- readonly-safe-mail-mcp serve
 ```
 
+- `--scope user` makes the server available to every Claude Code session on this
+  computer. Without it the server is registered for the current project only, and
+  sessions in other folders cannot search mail. Check with `claude mcp get readonly-safe-mail`.
+- Sessions that are already running pick it up after a restart. Other computers need
+  their own install and their own `claude mcp add`.
+- If `readonly-safe-mail-mcp` is not on your `PATH`, give the full path, for example
+  `~/.local/bin/readonly-safe-mail-mcp`.
+- With `--scope user`, every session in every folder can search your mail, including
+  sessions that read untrusted material. The server is read-only, but decide whether
+  you want that.
+- **Register the same copy that stored the password.** On a Mac the Keychain lets only
+  the Python that saved the password read it back. If you have two copies (say the
+  installed one and a development checkout) and register the other one, `check` reports
+  `password MISSING ... Keychain Access Denied` and syncing stops. Fix it by running
+  `set-password ACCOUNT` with the copy you registered, in Terminal.
+- A development checkout runs whatever code is in its folder at that moment. Register
+  one for all sessions only if you want every session to run your work in progress.
+
 **Claude Desktop**: `claude_desktop_config.json`
 
 ```json
