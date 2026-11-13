@@ -281,12 +281,38 @@ def _cmd_sync(args) -> int:
             print(f"{r.account}: FAILED: {r.error}")
         else:
             print(f"{r.account}: +{r.added:,} indexed, -{r.removed:,} removed, {len(r.folders)} folders")
+    rc = _sync_dav(cfg, args.account)
+    return rc or (0 if ok else 1)
+
+
+def _sync_dav(cfg, account: str | None) -> int:
+    """The contacts sync, after the mail sync has finished and released its lock."""
+    from . import davsync
+    from .sync import SyncBusy
+
+    try:
+        reports = davsync.sync_all(cfg, accounts=[account] if account else None)
+    except SyncBusy:
+        print(
+            "Another contacts sync is already running (CLI or MCP server). Try again later.", file=sys.stderr
+        )
+        return 1
+    except KeyboardInterrupt:
+        print("Interrupted; run sync again to continue.", file=sys.stderr)
+        return 130
+    ok = True
+    for r in reports:
+        if r.error:
+            ok = False
+            print(f"{r.account} {r.source}: FAILED: {r.error}")
+        else:
+            print(f"{r.account} {r.source}: +{r.added:,} stored, -{r.removed:,} removed")
     return 0 if ok else 1
 
 
 def _cmd_status(_args) -> int:
-    from . import index
-    from .query import status_lines
+    from . import davindex, index
+    from .query import source_status_lines, status_lines
 
     cfg = load_config()
     path = index.index_path(cfg)
@@ -297,7 +323,19 @@ def _cmd_status(_args) -> int:
     finally:
         if db:
             db.close()
+    dav_path = davindex.index_path(cfg)
+    if dav_path is not None:
+        db = davindex.connect(cfg, create=False)
+        try:
+            names = [a.name for a in davindex.dav_accounts(cfg)]
+            for line in source_status_lines(davindex.source_status(db, names, davindex.CONTACTS)):
+                print(line)
+        finally:
+            if db:
+                db.close()
     print(f"index: {path}" + ("" if path.exists() else " (not created yet: run sync)"))
+    if dav_path is not None:
+        print(f"contacts index: {dav_path}" + ("" if dav_path.exists() else " (not created yet: run sync)"))
     return 0
 
 

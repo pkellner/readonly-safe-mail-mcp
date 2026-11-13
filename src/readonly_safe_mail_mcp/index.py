@@ -25,7 +25,6 @@ from .config import Config
 from .sanitize import SANITIZER_VERSION, SanitizedMessage
 
 SCHEMA_VERSION = "1"
-_FILE_RE = re.compile(r"^index-[0-9a-f]{16}\.sqlite(?:-wal|-shm|-journal)?$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -78,10 +77,12 @@ def fingerprint(cfg: Config) -> str:
         }
         for name, a in sorted(cfg.accounts.items())
     }
-    blob = json.dumps(
-        {"schema": SCHEMA_VERSION, "sanitizer": SANITIZER_VERSION, "accounts": accounts}, sort_keys=True
-    )
-    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+    return fingerprint_of({"schema": SCHEMA_VERSION, "sanitizer": SANITIZER_VERSION, "accounts": accounts})
+
+
+def fingerprint_of(policy: dict) -> str:
+    """The generation name for a policy: a change to anything in `policy` selects a new file."""
+    return hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def index_path(cfg: Config) -> Path:
@@ -95,16 +96,26 @@ def ensure_data_dir(path: Path) -> None:
 
 def remove_other_generations(cfg: Config) -> list[str]:
     """Delete index files built under any other policy. Returns removed names."""
-    keep = index_path(cfg).name
+    return remove_generations(cfg.data_dir, "index", index_path(cfg))
+
+
+def generation_files(data_dir: Path, prefix: str) -> list[Path]:
+    """Every file of every generation named `<prefix>-<fingerprint>.sqlite`."""
+    pattern = re.compile(rf"^{re.escape(prefix)}-[0-9a-f]{{16}}\.sqlite(?:-wal|-shm|-journal)?$")
+    return [p for p in data_dir.glob(f"{prefix}-*.sqlite*") if pattern.match(p.name)]
+
+
+def remove_generations(data_dir: Path, prefix: str, keep: Path | None) -> list[str]:
+    """Delete the files of every `prefix` generation but `keep` (all of them if None)."""
     removed = []
-    for p in cfg.data_dir.glob("index-*.sqlite*"):
-        if _FILE_RE.match(p.name) and not p.name.startswith(keep):
+    for p in generation_files(data_dir, prefix):
+        if keep is None or not p.name.startswith(keep.name):
             p.unlink(missing_ok=True)
             removed.append(p.name)
     return removed
 
 
-def connect(path: Path, *, create: bool) -> sqlite3.Connection | None:
+def connect(path: Path, *, create: bool, schema: str = SCHEMA) -> sqlite3.Connection | None:
     """Open an index file. With create=False, returns None if it doesn't exist yet."""
     if not create and not path.exists():
         return None
@@ -117,7 +128,7 @@ def connect(path: Path, *, create: bool) -> sqlite3.Connection | None:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=30000")
         if create:
-            db.executescript(SCHEMA)
+            db.executescript(schema)
             db.execute("INSERT OR IGNORE INTO meta VALUES ('created', ?)", (str(time.time()),))
             db.commit()
     finally:

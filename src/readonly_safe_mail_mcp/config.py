@@ -16,11 +16,15 @@ from dataclasses import dataclass, field
 from email.utils import parseaddr
 from importlib import resources
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from . import paths
 from .textnorm import match_form
+
+if TYPE_CHECKING:
+    from .dav import DavHosts
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +59,7 @@ RULE_KEYS = frozenset(
 TOP_KEYS = frozenset(
     {"accounts", "folders", "sync_if_older_than", "attachments", "trusted_elicitation_clients"}
 )
-ACCOUNT_KEYS = frozenset({"preset", "host", "port", "username", "folders", "rules"})
+ACCOUNT_KEYS = frozenset({"preset", "host", "port", "username", "folders", "rules", "contacts"})
 FOLDER_KEYS = frozenset({"allow", "deny"})
 ATTACHMENT_MODES = ("ask", "never", "ask-unsandboxed")
 
@@ -252,6 +256,8 @@ class Account:
     username: str
     folders: Folders
     rules: Rules
+    contacts: bool = False
+    dav: DavHosts | None = None  # the preset's CardDAV/CalDAV hosts; None without one
 
 
 @dataclass(frozen=True)
@@ -299,8 +305,29 @@ def _parse_account(
         layers.append((f"{where}.rules", data["rules"]))
     rules = merge_rules(load_default_rules(), layers)
     folders = _parse_folders(data.get("folders"), f"{where}.folders", base_folders)
+
+    from .dav import DAV_PRESETS  # not at the top: dav imports imap, which imports this module
+
+    contacts = data.get("contacts", False)
+    if not isinstance(contacts, bool):
+        raise ConfigError(f"{where}: contacts must be true or false")
+    dav = DAV_PRESETS.get(preset) if preset is not None else None
+    if contacts and dav is None:
+        why = (
+            "Gmail needs OAuth, which this server does not support"
+            if preset == "gmail"
+            else f"CardDAV hosts are known only for the presets {', '.join(sorted(DAV_PRESETS))}"
+        )
+        raise ConfigError(f"{where}: contacts cannot be turned on: {why}")
     return Account(
-        name=name, host=host.strip(), port=port, username=username.strip(), folders=folders, rules=rules
+        name=name,
+        host=host.strip(),
+        port=port,
+        username=username.strip(),
+        folders=folders,
+        rules=rules,
+        contacts=contacts,
+        dav=dav,
     )
 
 
