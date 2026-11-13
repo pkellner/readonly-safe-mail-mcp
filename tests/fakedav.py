@@ -75,6 +75,7 @@ class FakeDAVServer:
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(5)
         self.port = self._sock.getsockname()[1]
+        self._stopping = False
         self._thread = threading.Thread(target=self._serve, daemon=True)
 
     def __enter__(self) -> FakeDAVServer:
@@ -82,8 +83,12 @@ class FakeDAVServer:
         return self
 
     def __exit__(self, *exc) -> None:
-        self._sock.close()
+        # On Linux, close() does not wake a thread blocked in accept(); a connection does.
+        self._stopping = True
+        socket.create_connection(("127.0.0.1", self.port), timeout=5).close()
         self._thread.join(timeout=5)
+        self._sock.close()
+        assert not self._thread.is_alive(), "fake server thread did not stop"
 
     def on(self, method: str, path: str, reply: Route, *, host: str | None = None) -> None:
         self.routes[(host, method, path)] = reply
@@ -102,6 +107,9 @@ class FakeDAVServer:
             try:
                 conn, _ = self._sock.accept()
             except OSError:
+                return
+            if self._stopping:
+                conn.close()
                 return
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
