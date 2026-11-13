@@ -141,7 +141,7 @@ def test_check_mail_only_never_opens_a_dav_source(setup, srv, capsys):
     setup(contacts=False, calendars=False)
     rc, lines = check(capsys)
     assert rc == 0
-    assert setup.opened == [] and srv.requests == []
+    assert setup.opened == [] and srv.requests == [] and srv.connections == 0
     assert not any(ln.startswith(("contacts:", "calendars:")) for ln in lines)
 
 
@@ -179,6 +179,7 @@ def test_check_foreign_redirect_is_refused_and_nothing_is_sent_there(setup, srv,
     assert any(ln.startswith("contacts: FAILED:") for ln in lines)
     assert FOREIGN not in {r.host for r in srv.requests}
     assert FOREIGN.encode() not in bytes(srv.received)
+    assert srv.connections == 1  # the contacts host only
 
 
 def test_check_incomplete_collection_list_fails(setup, srv, capsys):
@@ -207,7 +208,7 @@ def test_check_missing_password_skips_every_source(setup, srv, capsys, monkeypat
 
     monkeypatch.setattr(credentials, "get_password", missing)
     rc, lines = check(capsys)
-    assert rc == 1 and srv.requests == []
+    assert rc == 1 and srv.requests == [] and srv.connections == 0
 
 
 # --- sync and status wording ------------------------------------------------------------

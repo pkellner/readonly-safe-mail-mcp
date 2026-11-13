@@ -483,7 +483,7 @@ def _date(value: str, name: str) -> date | None:
 def _flags(r: sqlite3.Row) -> str:
     return "".join(
         f" {f}"
-        for f, on in (("(cancelled)", r["cancelled"]), ("(invitation, not accepted)", r["invitation"]))
+        for f, on in (("(cancelled)", r["cancelled"]), (f"(invitation, {r['invitation']})", r["invitation"]))
         if on
     )
 

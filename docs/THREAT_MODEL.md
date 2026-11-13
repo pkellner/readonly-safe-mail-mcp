@@ -74,22 +74,45 @@ CalDAV), so what follows is about keeping this server from using that.
   Tests assert that each of ten refused methods, sent through the source, `request`,
   `putrequest` and raw `send`, leaves the fake server's record empty. A bug here is a
   write to your contacts or calendar, and the tests are the only check; read this file.
+  The guard covers the package's own request paths, the only ones that exist. It is not a
+  sandbox against other code in the same process: Python code there can write to the
+  connection's socket directly (`conn.sock.sendall`), call `http.client.HTTPSConnection.send`
+  unbound on a guarded connection, or replace the method that opens the socket (the test
+  server does exactly that to reach `127.0.0.1`). Such code would have to be in the server
+  process already; the guard keeps this package's own code, and data the servers send, from
+  causing a write.
 - **Calendar content is writable by strangers.** Anyone can send an invitation, and a
   calendar service often puts it in your calendar unasked. Titles, locations, descriptions, organizer and
   attendee names, and repeat rules are all hostile input, and prompt injection can arrive
   that way as it does in mail. Every field is decoded and normalized first, then classified
   and redacted by the field policy (`fieldpolicy.py`, its own version, separate from the mail
-  sanitizer): free text gets the full mail redaction and keyword withholding, an organizer in
-  a blocked sender domain withholds the description, and a field that cannot be decoded is
-  withheld, never returned raw. Times and repeat rules are parsed into validated values and
+  sanitizer): HTML entities are decoded and, in notes and descriptions, markup is reduced
+  to its visible text first, as for mail; free text gets the full mail redaction and keyword
+  withholding, an organizer in a blocked sender domain (its address or its `EMAIL`
+  parameter) withholds the description, and a field that cannot be decoded, is in a
+  charset outside a fixed list, or is over 100,000 characters is withheld, never returned
+  raw or classified in part. Times and repeat rules are parsed into validated values and
   rendered by this code; raw text is never stored or shown. Results carry an
   untrusted-content line of their own.
-- **Phone numbers and addresses are shown (an exception to redaction).** Mail masks digit
-  runs, so phone numbers and postal codes would be `[code hidden]`; a contact card without
-  them is useless, so they are kept, but only in validated shapes: a phone must be ASCII and
-  have 7 to 15 digits, a postal code a short pattern; anything else is dropped. They go to
-  your AI provider with everything else the assistant reads. Free-text notes and event text
-  still get the mail redaction, and runs of 11 or more digits are masked in every text field.
+- **Phone numbers, addresses and birthdays are shown (an exception to redaction).** Mail
+  masks digit runs, so phone numbers and postal codes would be `[code hidden]`; a contact
+  card without them is useless, so they are kept, but only in validated shapes; anything
+  else is dropped. Exactly what is kept, so exactly what a code could hide in:
+  - a phone (`TEL`): ASCII digits only, 7 to 15 of them counting an extension, with spaces,
+    dots, hyphens, brackets and an optional leading `+`. So `TEL:4829135` is kept as a phone
+    number: a 7-digit code in a phone field shows. Invisible format characters inside it are
+    removed and the number kept; look-alike digits drop it.
+  - an address (`ADR`): every token of digits under 16 characters (`12`, `#1204`, `12-14`,
+    `482913`) is kept as a house number or PO box, in any script; other tokens get the mail
+    redaction. The postal code must be ASCII letters and digits, 2 to 8 of them, plus an
+    optional second group of 1 to 4 after a space or hyphen (10 characters at most).
+  - a birthday (`BDAY`): rendered as a date, its year between 1900 and next year (Apple's
+    "no year" marker is read as no year); any other year drops it, so `BDAY:48290131` is not
+    shown as `4829-01-31`. Month and day always show.
+  They go to your AI provider with everything else the assistant reads. Free-text notes and
+  event text still get the mail redaction, and runs of 11 or more digits are masked in every
+  text field. In single-line fields (names, titles, locations, labels) whitespace is joined
+  before redaction, so a tab or line break between the groups of a code does not hide it.
 - **The expansion worker has limits, and they differ by platform.** Repeat rules are
   expanded in a child process that receives validated values only, never iCalendar text,
   with an empty environment, no credentials and a wall-clock kill. The values are capped (a

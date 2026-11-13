@@ -379,6 +379,35 @@ def test_invitation_not_accepted_is_labelled(tmp_path):
     assert [line.split(" | ")[3] for line in out] == ["Planning (invitation, not accepted)", "Accepted"]
 
 
+def test_invitation_found_by_the_email_parameter_or_labelled_unknown(tmp_path):
+    # iCloud names attendees by urn:uuid with the address in EMAIL (RFC 7986); an alias of
+    # the user matches no account address, so acceptance is unknown rather than unlabelled.
+    db, _ = expanded(
+        tmp_path,
+        ics(
+            vevent(
+                "DTSTART:20260303T170000Z",
+                "ORGANIZER;CN=Dana;EMAIL=dana@example.org:urn:uuid:1111",
+                f"ATTENDEE;EMAIL={USER};PARTSTAT=NEEDS-ACTION:urn:uuid:2222",
+            )
+        ),
+        ics(
+            vevent(
+                "DTSTART:20260304T170000Z",
+                "ORGANIZER;CN=Dana:mailto:dana@example.org",
+                "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:alias@example.org",
+                uid="y",
+                summary="Alias",
+            )
+        ),
+    )
+    out = search(db, since="2026-03-01", until="2026-03-31")
+    assert [line.split(" | ")[3] for line in out] == [
+        "Planning (invitation, not accepted)",
+        "Alias (invitation, acceptance unknown)",
+    ]
+
+
 def test_vtodo_and_vjournal_are_not_indexed(tmp_path):
     todo = "BEGIN:VTODO\r\nUID:t\r\nSUMMARY:Chore\r\nDTSTART:20260303T090000Z\r\nEND:VTODO"
     db, _ = expanded(tmp_path, ics(todo), ics(vevent("DTSTART:20260303T170000Z")))
@@ -1384,7 +1413,7 @@ def test_read_event(tmp_path):
     assert query.read_event(db, eid, today=TODAY) == "\n".join(
         [
             f"#{eid} | icloud/Home",
-            "Title: Planning",
+            "Title: Planning (invitation, acceptance unknown)",
             "When: 2026-11-02 06:00–06:30",
             "Time zone: America/New_York",
             "Repeats: FREQ=WEEKLY;BYDAY=MO;UNTIL=2026-12-31 23:59 UTC; 1 date(s) excluded or changed; "
