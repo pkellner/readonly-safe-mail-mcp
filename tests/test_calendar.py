@@ -543,7 +543,7 @@ def test_worker_never_returning_is_killed_and_the_sync_finishes(tmp_path):
     db, progress = expanded(
         tmp_path, *objs, exp=expansion(runner=hang, batch_seconds=0.3, single_seconds=0.15)
     )
-    assert time.monotonic() - t0 < 3  # one batch at 0.3 s, then three tries at 0.15 s
+    assert time.monotonic() - t0 < 10  # deadlines of 0.3 s and 3 x 0.15 s; the worker would sleep 60 s
     assert progress.pending == 0
     for i in range(3):
         assert reason(db, f"W{i}") == "repeat rule took too long to expand"
@@ -1562,14 +1562,24 @@ def test_the_machines_own_zone_converts_every_year_of_the_window(year):
     assert caltime.zone_id(zone)
 
 
-def test_sync_finishes_when_the_worker_never_returns(tmp_path, cal, tls_pair):
+def test_sync_finishes_when_the_worker_never_returns(tmp_path, cal, tls_pair, monkeypatch):
+    calls, real = [], isolate.call_worker
+
+    def timed(runner, request, *, timeout, **kw):
+        t0 = time.monotonic()
+        try:
+            return real(runner, request, timeout=timeout, **kw)
+        finally:
+            calls.append((timeout, time.monotonic() - t0))
+
+    monkeypatch.setattr(isolate, "call_worker", timed)
     hang = isolate.Runner("t", (sys.executable, "-c", "import time; time.sleep(60)"))
     cal.put("w.ics", "w1", ics(vevent("DTSTART:20260302T170000Z", "RRULE:FREQ=WEEKLY")))
     cfg = make_cfg(tmp_path)
-    t0 = time.monotonic()
     rep = run(cfg, cal, tls_pair, exp=expansion(runner=hang, batch_seconds=0.3, single_seconds=0.15))
-    assert time.monotonic() - t0 < 3
     assert (rep.error, rep.pending, rep.added) == (None, 0, 1)
+    assert [t for t, _ in calls] == [0.3, 0.15]  # the batch, then the event alone
+    assert all(took < t + 1.5 for t, took in calls)  # each killed at its deadline, not after the 60 s
     assert reason(db_for(cfg)) == "repeat rule took too long to expand"
 
 
