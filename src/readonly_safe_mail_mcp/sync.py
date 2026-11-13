@@ -46,10 +46,10 @@ class SyncReport:
 
 
 @contextmanager
-def sync_lock(cfg: Config):
+def sync_lock(cfg: Config, name: str = "sync.lock"):
     """At most one sync at a time across processes (CLI and server)."""
     index.ensure_data_dir(cfg.data_dir)
-    path = cfg.data_dir / "sync.lock"
+    path = cfg.data_dir / name
     with open(path, "a+") as fh:
         try:
             import fcntl

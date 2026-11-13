@@ -187,6 +187,11 @@ def _line(normalized: str, cap: int = MAX_LINE_CHARS) -> str:
     return _cap(_LONG_DIGITS_RE.sub(CODE_MASK, sanitize_text(normalized)), cap)
 
 
+def display_line(text: str) -> str:
+    """A server-supplied label, such as an address book's name, as one sanitized, capped line."""
+    return _line(_normalize(text))
+
+
 def _free_text(what: str, normalized: str, rules: Rules, withhold: bool) -> tuple[str, bool, list[str]]:
     if withhold:
         return WITHHELD_SECURITY.format(what), True, [f"{what.lower()} withheld"]
