@@ -43,6 +43,8 @@ config is never in it (`.gitignore`).
 
 | Date | Commit | Machine | Run | Result | Duration |
 |---|---|---|---|---|---|
+| 2026-11-13 | 054a919 | MacBookM4 | fast suite (issue #1 merge test) | 1498 passed, 1 skipped, 1 xfailed | 21.7 s (load 2.3 to 7.5) |
+| 2026-11-13 | e258911 | GitHub CI | full matrix (issue #1 PR #10) | success | about 3 min |
 | 2026-11-13 | 6396c73 | MacBookM4 | fast suite | 227 passed, 1 skipped, 1 xfailed | 3.88 s (load 1.6) |
 | 2026-11-12 | 922b84a | GitHub CI | full matrix | success | 10 min 34 s |
 | 2026-11-12 | e615b46 | GitHub CI | full matrix | success | 3 min 45 s |
@@ -56,7 +58,25 @@ installed copy without touching it:
   `accounts.yaml`; `readonly-safe-mail-mcp paths` shows which folders are in use.
 - It never reads the op's config, index or Keychain entry.
 
-Not exercised yet (2026-11-13): the first issue to use it writes down the exact steps here.
+Steps (first used for issue #1, 2026-11-13), from the merge-test worktree after
+`uv venv && uv pip install -e ".[dev]"`:
+
+1. Make two new, empty scratch folders `<scratch>/cfg` and `<scratch>/data` (never reuse or
+   delete a folder that holds anything).
+2. Run [`preview.py`](preview.py) with the worktree's interpreter:
+   `RSMM_CONFIG_DIR=<scratch>/cfg RSMM_DATA_DIR=<scratch>/data
+   PYTHON_KEYRING_BACKEND=keyring.backends.fail.Keyring .venv/bin/python -I docs/guidance/preview.py`.
+   It writes a placeholder `accounts.yaml` (contacts and calendars on), stores placeholder
+   cards and events through the same functions the DAV sync uses, expands them with the
+   production worker, marks both sources as just synced so no tool call goes to the network,
+   then starts the installed `readonly-safe-mail-mcp serve` over stdio and calls the tools.
+   The fail keyring backend keeps every credential lookup away from the op's Keychain.
+3. Check the output: the tool list, one contact and one event read back, the untrusted-content
+   lines, the hidden code, the invitation label, the incomplete event named, and the
+   out-of-window note.
+
+The DAV fetch itself is not in the preview: it needs a server, and the tests cover it against
+`tests/fakedav.py`. Mail is not in it either.
 
 ## Live steps
 
