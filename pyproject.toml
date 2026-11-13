@@ -10,11 +10,12 @@ dependencies = [
   "pyyaml>=6",
   "keyring>=25",
   "truststore>=0.10",
+  # XML without entities or external references: DAV responses (dav.py) and Office files.
+  "defusedxml>=0.7",
   # Attachment readers. They only ever run inside the sandboxed worker (extract.py).
   "pypdf>=6",
   "pillow>=11",
   "pillow-heif>=0.20",
-  "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]
