@@ -1,5 +1,5 @@
-"""With contacts off, the server and CLI behave exactly as before issue #1 (Acceptance,
-"Mail untouched"). The expected values were taken from the code before contacts existed."""
+"""With contacts and calendars off, the server and CLI behave exactly as before issue #1
+(Acceptance, "Mail untouched"). The expected values were taken from the code before contacts existed."""
 
 import imaplib
 import sys
@@ -93,6 +93,10 @@ TOOLS = [
 
 ACCOUNTS = "accounts:\n  icloud: {preset: icloud, username: me@example.com}\n"
 CONTACTS_OFF = "accounts:\n  icloud: {preset: icloud, username: me@example.com, contacts: false}\n"
+BOTH_OFF = (
+    "calendar_years: 30\n"
+    "accounts:\n  icloud: {preset: icloud, username: me@example.com, contacts: false, calendars: false}\n"
+)
 
 
 class GuardedIMAP4(_ReadOnlyGuard, imaplib.IMAP4):
@@ -126,7 +130,7 @@ def call(mcp, name, args=None) -> str:
     return "\n".join(c.text for c in result.content)
 
 
-@pytest.mark.parametrize("accounts", [ACCOUNTS, CONTACTS_OFF])
+@pytest.mark.parametrize("accounts", [ACCOUNTS, CONTACTS_OFF, BOTH_OFF])
 def test_tool_list_and_instructions_unchanged(dirs, accounts):
     write_accounts(dirs, accounts)
     mcp = server.build_server()
@@ -135,15 +139,23 @@ def test_tool_list_and_instructions_unchanged(dirs, accounts):
 
 
 CONTACTS_ON = "accounts:\n  icloud: {preset: icloud, username: me@example.com, contacts: true}\n"
+CALENDARS_ON = (
+    "calendar_years: 50\naccounts:\n  icloud: {preset: icloud, username: me@example.com, calendars: true}\n"
+)
+CALENDARS_SOME = (
+    "accounts:\n  icloud: {preset: icloud, username: me@example.com, calendars: {allow: [Work]}}\n"
+)
 
 
-@pytest.mark.parametrize("accounts", [ACCOUNTS, CONTACTS_OFF, CONTACTS_ON])
+@pytest.mark.parametrize(
+    "accounts", [ACCOUNTS, CONTACTS_OFF, BOTH_OFF, CONTACTS_ON, CALENDARS_ON, CALENDARS_SOME]
+)
 def test_mail_index_keeps_its_name(dirs, accounts):
     write_accounts(dirs, accounts)
     assert index.index_path(load_config()).name == "index-2e537c89b600cdce.sqlite"
 
 
-@pytest.mark.parametrize("contacts", ["", ", contacts: false"])
+@pytest.mark.parametrize("contacts", ["", ", contacts: false", ", contacts: false, calendars: false"])
 def test_list_accounts_and_status_unchanged(dirs, capsys, contacts):
     m = EmailMessage()
     m["From"] = "Dana Reyes <dana@example.org>"

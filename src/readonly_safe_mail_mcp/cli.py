@@ -306,7 +306,8 @@ def _sync_dav(cfg, account: str | None) -> int:
             ok = False
             print(f"{r.account} {r.source}: FAILED: {r.error}")
         else:
-            print(f"{r.account} {r.source}: +{r.added:,} stored, -{r.removed:,} removed")
+            pending = f"; {r.pending:,} event(s) pending expansion (next sync)" if r.pending else ""
+            print(f"{r.account} {r.source}: +{r.added:,} stored, -{r.removed:,} removed{pending}")
     return 0 if ok else 1
 
 
@@ -327,15 +328,27 @@ def _cmd_status(_args) -> int:
     if dav_path is not None:
         db = davindex.connect(cfg, create=False)
         try:
-            names = [a.name for a in davindex.dav_accounts(cfg)]
-            for line in source_status_lines(davindex.source_status(db, names, davindex.CONTACTS)):
+            statuses = [
+                st
+                for source in (davindex.CONTACTS, davindex.CALENDARS)
+                for st in davindex.source_status(
+                    db, [a.name for a in davindex.dav_accounts(cfg, source)], source
+                )
+            ]
+            for line in source_status_lines(statuses, calendar_years=cfg.calendar_years):
                 print(line)
         finally:
             if db:
                 db.close()
     print(f"index: {path}" + ("" if path.exists() else " (not created yet: run sync)"))
     if dav_path is not None:
-        print(f"contacts index: {dav_path}" + ("" if dav_path.exists() else " (not created yet: run sync)"))
+        words = [
+            w
+            for s, w in (("contacts", "contacts"), ("calendars", "calendar"))
+            if davindex.dav_accounts(cfg, s)
+        ]
+        label = " and ".join(words)
+        print(f"{label} index: {dav_path}" + ("" if dav_path.exists() else " (not created yet: run sync)"))
     return 0
 
 

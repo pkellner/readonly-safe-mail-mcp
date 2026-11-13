@@ -37,6 +37,14 @@ NO_CONTACTS = "Contacts are not turned on for any account (accounts.yaml: contac
 NO_CONTACTS_INDEX = (
     "Contacts have not been synced yet. A background sync has been started; try again in a minute."
 )
+NO_CALENDARS = "Calendars are not turned on for any account (accounts.yaml: calendars: true)."
+NO_CALENDARS_INDEX = (
+    "Calendars have not been synced yet. A background sync has been started; try again in a minute."
+)
+_SOURCE_TEXT = {  # source -> (off, not synced yet, untrusted-content line, word for a running sync)
+    davindex.CONTACTS: (NO_CONTACTS, NO_CONTACTS_INDEX, q.UNTRUSTED_CONTACTS, "contacts"),
+    davindex.CALENDARS: (NO_CALENDARS, NO_CALENDARS_INDEX, q.UNTRUSTED_EVENTS, "calendar"),
+}
 
 
 class SyncRunner:
@@ -94,26 +102,28 @@ def _statuses(cfg: Config, db) -> list[index.AccountStatus]:
     return index.account_status(db, sorted(cfg.accounts))
 
 
-def _contact_statuses(cfg: Config) -> list[davindex.SourceStatus]:
+def _source_statuses(cfg: Config, source: str) -> list[davindex.SourceStatus]:
     db = davindex.connect(cfg, create=False)
     try:
-        return davindex.source_status(db, [a.name for a in davindex.dav_accounts(cfg)], davindex.CONTACTS)
+        return davindex.source_status(db, [a.name for a in davindex.dav_accounts(cfg, source)], source)
     finally:
         if db:
             db.close()
 
 
-def _contacts_on() -> bool:
-    """At start-up: whether any account has contacts on. A config that cannot be read leaves
+def _sources_on() -> set[str]:
+    """At start-up: the DAV sources some account has on. A config that cannot be read leaves
     them off; each tool call reloads the config and reports the error itself."""
     try:
-        return bool(davindex.dav_accounts(load_config()))
+        cfg = load_config()
     except (ConfigError, OSError):
-        return False
+        return set()
+    return {s for s in (davindex.CONTACTS, davindex.CALENDARS) if davindex.dav_accounts(cfg, s)}
 
 
 def build_server() -> MCPServer:
-    contacts = _contacts_on()
+    sources = _sources_on()
+    contacts, calendars = davindex.CONTACTS in sources, davindex.CALENDARS in sources
     mcp = MCPServer(
         "readonly-safe-mail",
         version=__version__,
@@ -123,6 +133,7 @@ def build_server() -> MCPServer:
             "Workflow: search -> find_passages or read_message on the ids you need. Attachments: "
             "request_attachments with the id and part shown by read_message; the user approves each."
             + (" Contacts: search_contacts -> read_contact on the ids you need." if contacts else "")
+            + (" Calendar: search_events -> read_event on the ids you need." if calendars else "")
         ),
     )
     dav_runner = SyncRunner(lambda cfg: davsync.sync_all(cfg))
@@ -138,11 +149,13 @@ def build_server() -> MCPServer:
         finally:
             if db:
                 db.close()
-        lines += q.source_status_lines(_contact_statuses(cfg))
+        statuses = [st for s in _SOURCE_TEXT for st in _source_statuses(cfg, s)]
+        lines += q.source_status_lines(statuses, calendar_years=cfg.calendar_years)
         if runner.running:
             lines.append("A sync is running now.")
-        if dav_runner.running and davindex.dav_accounts(cfg):
-            lines.append("A contacts sync is running now.")
+        words = [w for s, (*_, w) in _SOURCE_TEXT.items() if davindex.dav_accounts(cfg, s)]
+        if dav_runner.running and words:
+            lines.append(f"A {' and '.join(words)} sync is running now.")
         return "\n".join(lines)
 
     @mcp.tool(annotations=READ_ONLY, structured_output=False)
@@ -306,20 +319,21 @@ def build_server() -> MCPServer:
         _check_policy(fp)
         return q.UNTRUSTED + "\n" + (sep.join(out) if out else "No matching passages.")
 
-    def _contacts(fn) -> str:
+    def _dav(source: str, fn) -> str:
+        off, not_synced, untrusted, _ = _SOURCE_TEXT[source]
         cfg = _config()
         fp = davindex.fingerprint(cfg)
-        if fp is None:
-            return NO_CONTACTS
-        stats = _contact_statuses(cfg)
+        if fp is None or not davindex.dav_accounts(cfg, source):
+            return off
+        stats = _source_statuses(cfg, source)
         last = min((s.last_success or 0) for s in stats)
         if time.time() - last >= cfg.sync_if_older_than:
             dav_runner.start(cfg)
         db = davindex.connect(cfg, create=False)
         if db is None:
-            return NO_CONTACTS_INDEX
+            return not_synced
         try:
-            out = fn(db)
+            out = fn(db, cfg)
         except q.QueryError as e:
             raise ToolError(str(e)) from None
         finally:
@@ -327,7 +341,7 @@ def build_server() -> MCPServer:
         if davindex.fingerprint(_config()) != fp:
             raise ToolError(POLICY_CHANGED)
         notes = q.source_warnings(stats, cfg.sync_if_older_than)
-        return "\n".join([q.UNTRUSTED_CONTACTS, *notes, *(out or ["No matches."])])
+        return "\n".join([untrusted, *notes, *(out or ["No matches."])])
 
     if contacts:
 
@@ -345,8 +359,9 @@ def build_server() -> MCPServer:
             """Search contacts. query: words in any field (all must match), "exact phrase", OR, NOT,
             prefix*. name/org/email: substring. phone: digits in any format (555 1234 finds (555) 1234).
             One line per hit: #id | account | name | org | email | phone."""
-            return _contacts(
-                lambda db: q.search_contacts(
+            return _dav(
+                davindex.CONTACTS,
+                lambda db, cfg: q.search_contacts(
                     db,
                     query=query,
                     name=name,
@@ -356,13 +371,49 @@ def build_server() -> MCPServer:
                     account=account,
                     limit=limit,
                     offset=offset,
-                )
+                ),
             )
 
         @mcp.tool(annotations=READ_ONLY, structured_output=False)
         def read_contact(id: int) -> str:
             """One contact card (id from search_contacts): phones, emails, addresses, birthday, note."""
-            return _contacts(lambda db: [q.read_contact(db, id)])
+            return _dav(davindex.CONTACTS, lambda db, cfg: [q.read_contact(db, id)])
+
+    if calendars:
+
+        @mcp.tool(annotations=READ_ONLY, structured_output=False)
+        def search_events(
+            query: str = "",
+            since: str = "",
+            until: str = "",
+            account: str = "",
+            calendar: str = "",
+            limit: int = 20,
+            offset: int = 0,
+        ) -> str:
+            """Search calendar events by date range and/or words. since/until: YYYY-MM-DD, inclusive
+            (neither and no query: from today on). query: words in title, location, description or
+            people (all must match), "exact phrase", OR, NOT, prefix*. calendar: substring of its name.
+            One line per occurrence: #id | account | when | title | location."""
+            return _dav(
+                davindex.CALENDARS,
+                lambda db, cfg: q.search_events(
+                    db,
+                    query=query,
+                    since=since,
+                    until=until,
+                    account=account,
+                    calendar=calendar,
+                    limit=limit,
+                    offset=offset,
+                    calendar_years=cfg.calendar_years,
+                ),
+            )
+
+        @mcp.tool(annotations=READ_ONLY, structured_output=False)
+        def read_event(id: int) -> str:
+            """One event (id from search_events): time, repeat rule, location, people, description."""
+            return _dav(davindex.CALENDARS, lambda db, cfg: [q.read_event(db, id)])
 
     return mcp
 

@@ -1,12 +1,15 @@
-"""The second index file: what CardDAV sync stores (issue #1, "Second index file").
+"""The second index file: what CardDAV and CalDAV sync store (issue #1, "Second index file").
 
-Beside the mail index, never inside it, so that adding contacts (and later calendars)
-neither renames nor rebuilds the mail index. Only field-policy output is written here.
+Beside the mail index, never inside it, so that adding contacts and calendars neither
+renames nor rebuilds the mail index. Only field-policy output and validated event timing
+(caltime.py) are written here.
 
 Named `dav-<fingerprint>.sqlite` by its own policy: this schema, FIELD_POLICY_VERSION and,
 for every account with a DAV source on, its username, DAV hosts, rules and which sources
-are on. A change to any of them selects a new, empty file, as for mail (index.py). With no
-source on there is no file at all. File modes and generations are index.py's.
+are on (with the calendars' allow/deny lists). A change to any of them selects a new, empty
+file, as for mail (index.py). `calendar_years` is not part of it: changing the window only
+rebuilds occurrences, which are derived data. With no source on there is no file at all.
+File modes and generations are index.py's.
 """
 
 from __future__ import annotations
@@ -17,15 +20,21 @@ import sqlite3
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import index
 from .config import Account, Config
 from .fieldpolicy import FIELD_POLICY_VERSION, ContactFields, Item, phone_digits
 
-SCHEMA_VERSION = "1"
+if TYPE_CHECKING:
+    from .caltime import Built, ParsedEvent
+
+SCHEMA_VERSION = "2"
 PREFIX = "dav"
 CONTACTS = "contacts"
+CALENDARS = "calendars"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -79,12 +88,68 @@ CREATE TRIGGER IF NOT EXISTS contacts_au AFTER UPDATE ON contacts BEGIN
   VALUES (new.id, new.name, new.org, new.title, new.nickname, new.emails, new.addresses,
           CASE WHEN new.note_withheld THEN '' ELSE new.note END);
 END;
+CREATE TABLE IF NOT EXISTS cal_objects (
+  id INTEGER PRIMARY KEY,
+  collection INTEGER NOT NULL REFERENCES collections(id),
+  href TEXT NOT NULL, etag TEXT NOT NULL,
+  unreadable INTEGER NOT NULL DEFAULT 0,  -- the object could not be parsed; nothing of it is kept
+  UNIQUE (collection, href)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY,
+  object INTEGER NOT NULL REFERENCES cal_objects(id),
+  title TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '', description_withheld INTEGER NOT NULL DEFAULT 0,
+  organizer TEXT NOT NULL DEFAULT '',  -- JSON [name, address] or ''
+  attendees TEXT NOT NULL DEFAULT '[]',  -- JSON list of [name, address, status]
+  attendees_omitted INTEGER NOT NULL DEFAULT 0,
+  people TEXT NOT NULL DEFAULT '',  -- organizer and attendee names and addresses, for search
+  status TEXT NOT NULL DEFAULT '', cancelled INTEGER NOT NULL DEFAULT 0,
+  invitation INTEGER NOT NULL DEFAULT 0,  -- an invitation the user has not accepted
+  dropped TEXT NOT NULL DEFAULT '[]', notes TEXT NOT NULL DEFAULT '[]',
+  timing TEXT NOT NULL,  -- JSON: caltime.event_timing's validated values, never iCalendar text
+  incomplete TEXT NOT NULL DEFAULT '',  -- why the timing is not fully understood; '' when it is
+  expanded TEXT,  -- the window key its occurrences were built for; any other value: pending
+  expand_problem TEXT NOT NULL DEFAULT '',  -- why expansion stopped at the first occurrence
+  first_label TEXT NOT NULL DEFAULT '',
+  maybe_first INTEGER, maybe_last INTEGER  -- days an incomplete event could touch; NULL: unbounded
+);
+CREATE INDEX IF NOT EXISTS events_object ON events(object);
+CREATE INDEX IF NOT EXISTS events_expanded ON events(expanded);
+CREATE TABLE IF NOT EXISTS occurrences (
+  id INTEGER PRIMARY KEY,
+  event INTEGER NOT NULL REFERENCES events(id),
+  start REAL NOT NULL,  -- epoch seconds; an all-day occurrence: local midnight
+  first_day INTEGER NOT NULL, last_day INTEGER NOT NULL,  -- local date ordinals, inclusive
+  label TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS occurrences_days ON occurrences(first_day, last_day);
+CREATE INDEX IF NOT EXISTS occurrences_event ON occurrences(event);
+CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+  title, location, description, people, content='events', content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS events_ai AFTER INSERT ON events BEGIN
+  INSERT INTO events_fts(rowid, title, location, description, people)
+  VALUES (new.id, new.title, new.location,
+          CASE WHEN new.description_withheld THEN '' ELSE new.description END, new.people);
+END;
+CREATE TRIGGER IF NOT EXISTS events_ad AFTER DELETE ON events BEGIN
+  INSERT INTO events_fts(events_fts, rowid, title, location, description, people)
+  VALUES ('delete', old.id, old.title, old.location,
+          CASE WHEN old.description_withheld THEN '' ELSE old.description END, old.people);
+END;
 """
 
 
-def dav_accounts(cfg: Config) -> list[Account]:
-    """Accounts with a DAV source on, by name."""
-    return [a for _, a in sorted(cfg.accounts.items()) if a.contacts]
+def dav_accounts(cfg: Config, source: str | None = None) -> list[Account]:
+    """Accounts with a DAV source on (`source`: that one), by name."""
+    return [
+        a
+        for _, a in sorted(cfg.accounts.items())
+        if (a.contacts and source in (None, CONTACTS))
+        or (a.calendars is not None and source in (None, CALENDARS))
+    ]
 
 
 def fingerprint(cfg: Config) -> str | None:
@@ -94,6 +159,7 @@ def fingerprint(cfg: Config) -> str | None:
             "dav": dataclasses.asdict(a.dav) if a.dav else None,
             "rules": a.rules.as_dict(),
             "contacts": a.contacts,
+            "calendars": dataclasses.asdict(a.calendars) if a.calendars is not None else None,
         }
         for a in dav_accounts(cfg)
     }
@@ -174,6 +240,9 @@ def drop_collections_except(
     gone = [c.id for c in collections(db, account, source) if (c.host, c.href) not in keep]
     for cid in gone:
         db.execute("DELETE FROM contacts WHERE collection=?", (cid,))
+        delete_objects(
+            db, cid, [h for (h,) in db.execute("SELECT href FROM cal_objects WHERE collection=?", (cid,))]
+        )
         db.execute("DELETE FROM collections WHERE id=?", (cid,))
     return len(gone)
 
@@ -235,6 +304,112 @@ def delete_contacts(db: sqlite3.Connection, collection: int, hrefs: Iterable[str
     return n
 
 
+def object_etags(db: sqlite3.Connection, collection: int) -> dict[str, str]:
+    return dict(db.execute("SELECT href, etag FROM cal_objects WHERE collection=?", (collection,)).fetchall())
+
+
+def _drop_events(db: sqlite3.Connection, obj: int) -> None:
+    db.execute("DELETE FROM occurrences WHERE event IN (SELECT id FROM events WHERE object=?)", (obj,))
+    db.execute("DELETE FROM events WHERE object=?", (obj,))
+
+
+def store_object(
+    db: sqlite3.Connection, collection: int, href: str, etag: str, events: list[ParsedEvent] | None
+) -> None:
+    """Insert or replace one calendar object and its events, whose occurrences are then
+    pending. `events` None stores an unreadable object: its etag only."""
+    db.execute(
+        "INSERT INTO cal_objects (collection, href, etag, unreadable) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (collection, href) DO UPDATE SET etag=excluded.etag, unreadable=excluded.unreadable",
+        (collection, href, etag, int(events is None)),
+    )
+    (obj,) = db.execute(
+        "SELECT id FROM cal_objects WHERE collection=? AND href=?", (collection, href)
+    ).fetchone()
+    _drop_events(db, obj)
+    for ev in events or ():
+        f = ev.fields
+        org = [f.organizer.name, f.organizer.address] if f.organizer else None
+        people = [p for p in (f.organizer, *f.attendees) if p is not None]
+        db.execute(
+            "INSERT INTO events (object, title, location, description, description_withheld, organizer, "
+            "attendees, attendees_omitted, people, status, cancelled, invitation, dropped, notes, timing, "
+            "incomplete) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                obj,
+                f.title,
+                f.location,
+                f.description,
+                int(f.description_withheld),
+                json.dumps(org) if org else "",
+                json.dumps([[p.name, p.address, p.status] for p in f.attendees]),
+                f.attendees_omitted,
+                " ".join(x for p in people for x in (p.name, p.address) if x),
+                f.status,
+                int(f.cancelled),
+                int(f.invitation_not_accepted),
+                json.dumps(list(f.dropped)),
+                json.dumps(list(f.notes)),
+                json.dumps(ev.timing),
+                "; ".join(ev.timing["incomplete"]),
+            ),
+        )
+
+
+def delete_objects(db: sqlite3.Connection, collection: int, hrefs: Iterable[str]) -> int:
+    n = 0
+    for h in hrefs:
+        row = db.execute(
+            "SELECT id FROM cal_objects WHERE collection=? AND href=?", (collection, h)
+        ).fetchone()
+        if row is not None:
+            _drop_events(db, row[0])
+            n += db.execute("DELETE FROM cal_objects WHERE id=?", (row[0],)).rowcount
+    return n
+
+
+def set_window(db: sqlite3.Connection, years: int, first: date, end: date, key: str) -> None:
+    """The window occurrences are being built for. Events built under another key are pending."""
+    value = json.dumps({"years": years, "first": first.isoformat(), "end": end.isoformat(), "key": key})
+    db.execute(
+        "INSERT INTO meta VALUES ('window', ?) ON CONFLICT (key) DO UPDATE SET value=excluded.value", (value,)
+    )
+
+
+def stored_window(db: sqlite3.Connection) -> dict | None:
+    row = db.execute("SELECT value FROM meta WHERE key='window'").fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def pending_events(db: sqlite3.Connection, key: str) -> list[tuple[int, str]]:
+    return db.execute("SELECT id, timing FROM events WHERE expanded IS NOT ? ORDER BY id", (key,)).fetchall()
+
+
+def count_pending(db: sqlite3.Connection, key: str, account: str | None = None) -> int:
+    sql = "SELECT count(*) FROM events e WHERE e.expanded IS NOT ?"
+    args: tuple = (key,)
+    if account is not None:
+        sql += (
+            " AND e.object IN (SELECT o.id FROM cal_objects o JOIN collections c ON c.id = o.collection "
+            "WHERE c.account = ?)"
+        )
+        args += (account,)
+    return db.execute(sql, args).fetchone()[0]
+
+
+def store_occurrences(db: sqlite3.Connection, event: int, built: Built, key: str, problem: str) -> None:
+    db.execute("DELETE FROM occurrences WHERE event=?", (event,))
+    db.executemany(
+        "INSERT INTO occurrences (event, start, first_day, last_day, label) VALUES (?, ?, ?, ?, ?)",
+        [(event, o.start, o.first_day, o.last_day, o.label) for o in built.occurrences],
+    )
+    db.execute(
+        "UPDATE events SET expanded=?, expand_problem=?, first_label=?, maybe_first=?, maybe_last=? "
+        "WHERE id=?",
+        (key, problem, built.first_label, built.maybe_first, built.maybe_last, event),
+    )
+
+
 def record_attempt(
     db: sqlite3.Connection, account: str, source: str, *, ok: bool, error: str | None = None
 ) -> None:
@@ -260,25 +435,49 @@ def record_attempt(
 class SourceStatus:
     account: str
     source: str
-    items: int
-    unreadable: int
+    items: int  # cards, or events
+    unreadable: int  # cards, or calendar objects
     collections: int
     last_success: float | None
     last_error: str | None
     last_error_at: float | None
+    incomplete: int = 0  # events whose timing is not fully understood
+    pending: int = 0  # events whose occurrences are not built for the current window yet
+    window: str = ""  # the days occurrences are built for, "2016-11-01 to 2036-11-30"; "" before any
+
+
+_COUNTS = {
+    CONTACTS: (
+        "SELECT count(*), coalesce(sum(t.unreadable), 0), 0, 0 FROM contacts t "
+        "JOIN collections c ON c.id = t.collection WHERE c.account=? AND c.source=?"
+    ),
+    CALENDARS: (
+        "SELECT (SELECT count(*) FROM events e JOIN cal_objects o ON o.id = e.object "
+        "  JOIN collections c ON c.id = o.collection WHERE c.account=?1 AND c.source=?2), "
+        "(SELECT count(*) FROM cal_objects o JOIN collections c ON c.id = o.collection "
+        "  WHERE o.unreadable AND c.account=?1 AND c.source=?2), "
+        "(SELECT count(*) FROM events e JOIN cal_objects o ON o.id = e.object "
+        "  JOIN collections c ON c.id = o.collection "
+        "  WHERE (e.incomplete != '' OR e.expand_problem != '') AND c.account=?1 AND c.source=?2), "
+        "(SELECT count(*) FROM events e JOIN cal_objects o ON o.id = e.object "
+        "  JOIN collections c ON c.id = o.collection "
+        "  WHERE e.expanded IS NOT ?3 AND c.account=?1 AND c.source=?2)"
+    ),
+}
 
 
 def source_status(db: sqlite3.Connection | None, accounts: Iterable[str], source: str) -> list[SourceStatus]:
     out = []
+    win = stored_window(db) if db is not None and source == CALENDARS else None
+    label = (
+        f"{win['first']} to {(date.fromisoformat(win['end']) - timedelta(days=1)).isoformat()}" if win else ""
+    )
     for name in accounts:
         if db is None:
             out.append(SourceStatus(name, source, 0, 0, 0, None, None, None))
             continue
-        n, bad = db.execute(
-            "SELECT count(*), coalesce(sum(t.unreadable), 0) FROM contacts t "
-            "JOIN collections c ON c.id = t.collection WHERE c.account=? AND c.source=?",
-            (name, source),
-        ).fetchone()
+        args = (name, source) if source == CONTACTS else (name, source, win["key"] if win else "")
+        n, bad, incomplete, pending = db.execute(_COUNTS[source], args).fetchone()
         cols = db.execute(
             "SELECT count(*) FROM collections WHERE account=? AND source=?", (name, source)
         ).fetchone()[0]
@@ -286,5 +485,9 @@ def source_status(db: sqlite3.Connection | None, accounts: Iterable[str], source
             "SELECT last_success, last_error, last_error_at FROM sources WHERE account=? AND source=?",
             (name, source),
         ).fetchone()
-        out.append(SourceStatus(name, source, n, bad, cols, *(s if s else (None, None, None))))
+        out.append(
+            SourceStatus(
+                name, source, n, bad, cols, *(s if s else (None, None, None)), incomplete, pending, label
+            )
+        )
     return out
