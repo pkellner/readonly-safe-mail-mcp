@@ -2,6 +2,7 @@
 "Mail untouched"). The expected values were taken from the code before contacts existed."""
 
 import imaplib
+import sys
 from email.message import EmailMessage
 
 import anyio
@@ -20,14 +21,23 @@ INSTRUCTIONS = (
     "and part shown by read_message; the user approves each."
 )
 
+
+def doc(text: str) -> str:
+    """A description as the client sees it: from Python 3.13 the compiler strips the common
+    leading whitespace from a docstring's continuation lines (the 8 spaces of server.py)."""
+    return text.replace("\n        ", "\n") if sys.version_info >= (3, 13) else text
+
+
 # (name, description, {argument: type}, required, read_only_hint, idempotent_hint)
 TOOLS = [
     ("list_accounts", "Accounts, sync status, and indexed message counts.", {}, [], True, True),
     (
         "search",
-        'Search email. query: words (all must match), "exact phrase", OR, NOT, prefix*.\n'
-        "        from_/to: substring of name or address. since/until: YYYY-MM-DD. sort: relevance|date.\n"
-        "        One line per hit: #id | account | date | from | subject | snippet.",
+        doc(
+            'Search email. query: words (all must match), "exact phrase", OR, NOT, prefix*.\n'
+            "        from_/to: substring of name or address. since/until: YYYY-MM-DD. sort: relevance|date.\n"
+            "        One line per hit: #id | account | date | from | subject | snippet."
+        ),
         {
             "query": "string",
             "from_": "string",
@@ -70,8 +80,10 @@ TOOLS = [
     ),
     (
         "request_attachments",
-        "Open attachments (id + part from read_message). The user approves each in a dialog;\n"
-        "        approved ones are read in a sandbox and returned as sanitized text or images.",
+        doc(
+            "Open attachments (id + part from read_message). The user approves each in a dialog;\n"
+            "        approved ones are read in a sandbox and returned as sanitized text or images."
+        ),
         {"items": "array"},
         ["items"],
         True,
