@@ -2087,13 +2087,14 @@ def test_concurrent_index_opens_keep_the_umask_and_owner_only_files(tmp_path, mo
     monkeypatch.setattr(index.sqlite3, "connect", slow)
     files = [tmp_path / "data" / "a.sqlite", tmp_path / "data" / "b.sqlite"]
     old = os.umask(0o022)
+    before = os.umask(0o022)  # what the platform keeps of 0o022 (Windows keeps only 0o200 and 0o400)
     try:
         threads = [threading.Thread(target=lambda p=p: index.connect(p, create=True).close()) for p in files]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        assert os.umask(0o022) == 0o022  # restored, not left at the other thread's 0o077
+        assert os.umask(0o022) == before  # restored, not left at the other thread's 0o077
     finally:
         os.umask(old)
     if os.name == "posix":
