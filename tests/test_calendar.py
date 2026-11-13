@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import time
+from contextlib import closing
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -902,11 +903,13 @@ def db_for(cfg):
 
 
 def titles(cfg) -> list[str]:
-    return [r[0] for r in db_for(cfg).execute("SELECT title FROM events ORDER BY title")]
+    with closing(db_for(cfg)) as db:  # Windows cannot delete an old generation while it is open
+        return [r[0] for r in db.execute("SELECT title FROM events ORDER BY title")]
 
 
 def stored_ctag(cfg, href=CAL):
-    return db_for(cfg).execute("SELECT ctag FROM collections WHERE href=?", (href,)).fetchone()[0]
+    with closing(db_for(cfg)) as db:
+        return db.execute("SELECT ctag FROM collections WHERE href=?", (href,)).fetchone()[0]
 
 
 def seed(cal, n=3):
