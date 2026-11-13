@@ -131,6 +131,8 @@ def test_attachment_rendering_unchanged_for_vcf():
     text = items[0]["text"]
     assert "Name: Jane Q. Doe" in text
     assert "Phone (cell): +1 555 0100" in text
+    assert "Organization: Example Co, Sales; West\n" in text
+    assert "1 Example St; Apt 2, Springfield" in text
     assert "Note: Line one\nLine two" in text
 
 

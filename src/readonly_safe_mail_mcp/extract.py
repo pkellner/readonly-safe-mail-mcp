@@ -22,7 +22,7 @@ import re
 import sys
 import zipfile
 
-from .vcal import _ical_unescape, _ics_time, _prop, _unfold
+from .vcal import _ical_unescape, _ics_time, _prop, _split_components, _unfold
 
 # --- limits (enforced while decoding, not after) -------------------------------
 
@@ -389,11 +389,10 @@ def extract_vcf(data: bytes, charset: str | None) -> list[dict]:
         if not label:
             continue
         kind = params.get("TYPE", "").lower()
-        v = _ical_unescape(value)
-        if name == "ADR":
-            v = ", ".join(x for x in v.split(";") if x.strip())
-        elif name == "ORG":
-            v = ", ".join(x for x in v.split(";") if x.strip())
+        if name in ("ADR", "ORG"):
+            v = ", ".join(x for x in _split_components(value) if x.strip())
+        else:
+            v = _ical_unescape(value)
         lines_out.append(f"{label}{f' ({kind})' if kind else ''}: {v}")
     return [{"text": "\n".join(lines_out)}] + items
 
