@@ -289,3 +289,16 @@ def test_installer_line_loads(tmp_path, monkeypatch, flags, contacts, calendars)
         (tmp_path / "accounts.yaml").read_text().replace("# calendar_years: 10", "calendar_years: 25")
     )
     assert load_config(tmp_path, tmp_path / "data").calendar_years == 25
+
+
+def test_check_names_allow_and_deny_entries_that_match_no_calendar(setup, capsys, tmp_path):
+    """Calendars are chosen by name, so a typo in deny would leave that calendar indexed."""
+    setup()
+    (tmp_path / "cfg" / "accounts.yaml").write_text(
+        "accounts:\n  icloud: { preset: icloud, username: me@example.org, "
+        "calendars: { allow: [home, Hoem], deny: [Birthdays] } }\n"
+    )
+    rc, lines = check(capsys)
+    assert rc == 0
+    assert "calendars: logged in over CalDAV; 2 calendar(s); only read requests sent" in lines
+    assert "calendars: allow/deny name(s) matching no calendar: Hoem, Birthdays" in lines

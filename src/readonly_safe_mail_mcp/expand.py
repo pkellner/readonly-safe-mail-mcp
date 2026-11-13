@@ -6,19 +6,27 @@ there is one, else as a plain child with the same limits:
 Calendar content is writable by strangers, so this process gets validated values only,
 never iCalendar text: wall-clock times as ISO strings, and repeat rules as a dict of
 enumerations and integers built by caltime.py. Request on stdin, one JSON object:
-  {"events": [{"id", "start", "rule", "rdates", "exdates", "after", "before", "max"}, ...]}
+  {"events": [{"id", "start", "rule", "rdates", "exdates", "after", "before", "max"}, ...],
+   "event_seconds": 1.0}
 Reply on stdout:
   {"ok": true, "results": [{"id", "starts": [...]} | {"id", "error": "..."}]}
   {"ok": false, "error": "..."}
 Each event's starts are its occurrences in [after, before), in the event's own wall-clock
-time; the parent converts them to instants. Bounded by construction (start of 1900 or
-later, FREQ daily or coarser, UNTIL clamped to `before`, at most MAX_STEPS rule steps and
-`max` occurrences), and the parent kills this process at a wall-clock deadline.
+time; the parent converts them to instants.
+
+What bounds the work: a wall-clock limit per event (`event_seconds`, SIGALRM, POSIX only),
+after which that event alone is answered "took too long" and the next one starts; and
+the parent's kill of this process at its deadline, the only bound on Windows. The caps on
+the values (start of 1900 or later, FREQ daily or coarser, UNTIL clamped to `before`, at
+most MAX_STEPS occurrences looked at and `max` kept) do not bound it alone: dateutil
+looks for the next match without yielding, so a rule that never matches
+(FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30) runs to the year 9999 inside one step.
 """
 
 from __future__ import annotations
 
 import json
+import signal
 import sys
 from datetime import date, datetime
 
@@ -27,6 +35,7 @@ from dateutil import rrule
 MAX_INPUT_BYTES = 20_000_000
 MAX_EVENTS = 200
 MAX_STEPS = 100_000
+EVENT_SECONDS = 1.0
 MAX_DATES = 10_000  # RDATE, EXDATE and replaced occurrences; caltime.py allows 2,000 of each property
 MAX_LIST = 400
 MIN_YEAR = 1900
@@ -48,6 +57,14 @@ RULE_KEYS = {"freq", "interval", "count", "until", "bymonth", "byday", "wkst", *
 
 class Refused(ValueError):
     pass
+
+
+class _TooLong(Exception):  # not a ValueError: only the per-event limit raises it
+    pass
+
+
+def _too_long(signum, frame):
+    raise _TooLong
 
 
 def _int(v: object, lo: int, hi: int) -> int:
@@ -153,17 +170,35 @@ def expand(request: dict) -> list[dict]:
     events = request.get("events")
     if not isinstance(events, list) or len(events) > MAX_EVENTS:
         raise Refused("bad request")
+    seconds = request.get("event_seconds", EVENT_SECONDS)
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not 0 < seconds <= 60:
+        raise Refused("bad request")
+    timer = hasattr(signal, "setitimer")  # POSIX; on Windows only the parent's kill bounds an event
+    old = signal.signal(signal.SIGALRM, _too_long) if timer else None
     results = []
-    for ev in events:
-        eid = ev.get("id") if isinstance(ev, dict) else None
-        if isinstance(eid, bool) or not isinstance(eid, int):
-            raise Refused("bad request")
-        try:
-            results.append({"id": eid, "starts": expand_one(ev)})
-        except Refused as e:
-            results.append({"id": eid, "error": str(e)})
-        except (ValueError, OverflowError, TypeError, KeyError) as e:
-            results.append({"id": eid, "error": f"repeat rule could not be expanded ({type(e).__name__})"})
+    try:
+        for ev in events:
+            eid = ev.get("id") if isinstance(ev, dict) else None
+            if isinstance(eid, bool) or not isinstance(eid, int):
+                raise Refused("bad request")
+            try:
+                if timer:
+                    signal.setitimer(signal.ITIMER_REAL, seconds)
+                try:
+                    result = {"id": eid, "starts": expand_one(ev)}
+                finally:
+                    if timer:
+                        signal.setitimer(signal.ITIMER_REAL, 0)
+            except _TooLong:
+                result = {"id": eid, "error": "repeat rule took too long to expand"}
+            except Refused as e:
+                result = {"id": eid, "error": str(e)}
+            except (ValueError, OverflowError, TypeError, KeyError) as e:
+                result = {"id": eid, "error": f"repeat rule could not be expanded ({type(e).__name__})"}
+            results.append(result)
+    finally:
+        if timer:
+            signal.signal(signal.SIGALRM, old)
     return results
 
 

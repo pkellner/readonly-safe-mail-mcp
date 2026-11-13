@@ -13,6 +13,7 @@ import re
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from xml.sax.saxutils import escape
@@ -57,6 +58,7 @@ class Reply:
     chunked: bool = False
     declared_length: int | None = None  # a Content-Length that lies; the server then closes
     cut: int = 0  # drop this many bytes from the end of the rendered reply, then close
+    drip: float = 0.0  # send the body one byte at a time, this many seconds apart
 
 
 Route = Reply | Callable[[Request], Reply]
@@ -127,7 +129,6 @@ class FakeDAVServer:
 
     def _session(self, conn) -> None:
         rf = conn.makefile("rb")
-        out = conn.makefile("wb")
         while True:
             line = rf.readline(65537)
             if not line:
@@ -152,8 +153,17 @@ class FakeDAVServer:
                 self.requests.append(req)
             reply = self._route(req)
             data = self._render(reply)
-            out.write(data[: len(data) - reply.cut])
-            out.flush()
+            data = data[: len(data) - reply.cut]
+            # sendall, not a buffered writer: a client that gives up leaves no bytes behind
+            # for a writer to fail on when it is collected.
+            if reply.drip:
+                head = data.index(b"\r\n\r\n") + 4
+                conn.sendall(data[:head])
+                for i in range(head, len(data)):
+                    time.sleep(reply.drip)
+                    conn.sendall(data[i : i + 1])
+            else:
+                conn.sendall(data)
             if reply.declared_length is not None or reply.cut:
                 return
 

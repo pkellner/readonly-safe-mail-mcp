@@ -185,6 +185,13 @@ def _dav_check(acct: Account, password: str) -> tuple[bool, list[str]]:
                     lines.append(
                         f"{source}: logged in over {protocol}; {n} {noun}(s); only read requests sent"
                     )
+                    if source == davindex.CALENDARS and acct.calendars is not None:
+                        types = [(it.displayname or "", it.resource_types or ()) for it in found]
+                        unmatched = acct.calendars.unmatched([name for name, t in types if "calendar" in t])
+                        if unmatched:
+                            lines.append(
+                                f"calendars: allow/deny name(s) matching no calendar: {', '.join(unmatched)}"
+                            )
                 except DavError as e:
                     ok = False
                     lines.append(f"{source}: FAILED: {e}")

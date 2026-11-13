@@ -245,6 +245,20 @@ class Folders:
             return False
         return "*" in self.allow or folder in self.allow
 
+    def permits_name(self, name: str) -> bool:
+        """For calendars, chosen by display name: compared in match_form (case, accents and
+        spacing ignored), so "birthdays" in deny drops "Birthdays". Mail folders
+        are IMAP names, compared exactly by permits."""
+        key = match_form(name)
+        if key in {match_form(d) for d in self.deny}:
+            return False
+        return "*" in self.allow or key in {match_form(a) for a in self.allow}
+
+    def unmatched(self, names: list[str]) -> list[str]:
+        """The allow and deny entries that permits_name matches to none of `names`."""
+        keys = {match_form(n) for n in names}
+        return [x for x in (*self.allow, *self.deny) if x != "*" and match_form(x) not in keys]
+
 
 ALL_CALENDARS = Folders(allow=("*",), deny=())
 

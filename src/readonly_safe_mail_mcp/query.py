@@ -107,8 +107,9 @@ def warnings(statuses: list[AccountStatus], interval: int, now: float | None = N
     return out
 
 
-def _failed(s: AccountStatus | SourceStatus) -> bool:
-    return bool(s.last_error) and (s.last_success or 0) < (s.last_error_at or 0)
+def failed(s: AccountStatus | SourceStatus) -> bool:
+    # <=: a success clears last_error, and an expansion failure can follow it in the same clock tick
+    return bool(s.last_error) and (s.last_success or 0) <= (s.last_error_at or 0)
 
 
 def _calendar_state(s: SourceStatus, calendar_years: int | None) -> str:
@@ -139,22 +140,30 @@ def source_status_lines(
             bad = f" ({s.unreadable:,} could not be read)" if s.unreadable else ""
             state = f"{s.items:,} cards in {s.collections:,} address book(s){bad}"
         line = f"{s.account} {s.source}: {state}; last sync {_ago(s.last_success, now)}"
-        if _failed(s):
+        if failed(s):
             line += f"; latest sync FAILED: {s.last_error}"
         out.append(line)
     return out
 
 
 def source_warnings(statuses: list[SourceStatus], interval: int, now: float | None = None) -> list[str]:
-    """Notes prefixed to contact results when a source is not synced or its sync keeps failing."""
+    """Notes prefixed to contact and calendar results answered from data that may be behind:
+    never synced, a first sync not finished, a failing sync, or older than the interval."""
     now = now or time.time()
     out = []
     for s in statuses:
         if s.last_success is None and not s.collections:
             out.append(f"Note: {s.account} {s.source} have not been synced yet.")
-        elif _failed(s) and now - (s.last_success or 0) > 2 * interval:
+        elif failed(s) and now - (s.last_success or 0) > 2 * interval:
             out.append(
                 f"Note: {s.account} {s.source} last synced {_ago(s.last_success, now)}; latest sync failed."
+            )
+        elif s.last_success is None:
+            out.append(f"Note: {s.account} {s.source}: the first sync has not finished; some may be missing.")
+        elif now - s.last_success >= interval:
+            out.append(
+                f"Note: {s.account} {s.source} last synced {_ago(s.last_success, now)}; "
+                "newer changes may be missing."
             )
     return out
 
@@ -564,7 +573,7 @@ def search_events(
                 f"WHERE o.first_day <= ? AND o.last_day >= ? {''.join(' AND ' + w for w in cond)} "
                 "ORDER BY o.start, e.id LIMIT ? OFFSET ?"
             )
-            rows = db.execute(sql, (*range_args, *cargs, limit, offset)).fetchall()
+            rows = db.execute(sql, (*range_args, *cargs, limit + 1, offset)).fetchall()
         else:
             nxt = (  # ?1 is today, in both subqueries
                 "SELECT {} FROM occurrences o WHERE o.event = e.id AND o.last_day >= ?1 "
@@ -577,7 +586,7 @@ def search_events(
                 f"WHERE {' AND '.join(cond) or '1'} "
                 "ORDER BY next_start IS NULL, next_start, e.id DESC LIMIT ? OFFSET ?"
             )
-            rows = db.execute(sql, (today.toordinal(), *cargs, limit, offset)).fetchall()
+            rows = db.execute(sql, (today.toordinal(), *cargs, limit + 1, offset)).fetchall()
         inc_where = " AND ".join(inc)
         named = db.execute(
             f"SELECT e.*, c.account FROM {_EVENT_FROM} WHERE {inc_where} ORDER BY e.id LIMIT ?",
@@ -596,12 +605,14 @@ def search_events(
     else:
         rows, named, total = run(None)
     out = notes
-    for r in rows:
+    for r in rows[:limit]:
         when = r["label"] or (r["past"] if not dated else "") or r["first_label"]
         repeats = not dated and json.loads(r["timing"])["repeat"]
         out.append(_event_line(r, when + (" (repeats)" if repeats else "")))
     if not rows:
         out.append("No matches.")
+    elif len(rows) > limit:
+        out.append(f"[more matches: next page with offset={offset + limit}]")
     if named:
         more = f"; and {total - len(named):,} more" if total > len(named) else ""
         listed = "; ".join(
