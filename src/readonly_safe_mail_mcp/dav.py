@@ -90,10 +90,10 @@ class DavHosts:
     def base(self, host: object) -> str | None:
         """The contacts or calendars host that `host` is, or is a partition host of; None
         when `host` is not allowed. Two hosts with the same base serve the same account."""
-        if not isinstance(host, str):
+        if type(host) is not str:
             return None
         for base in (self.contacts, self.calendars):
-            if host == base or (self.partitions and re.fullmatch(r"p\d{1,3}-" + re.escape(base), host)):
+            if host == base or (self.partitions and re.fullmatch(r"p[0-9]{1,3}-" + re.escape(base), host)):
                 return base
         return None
 
@@ -124,12 +124,12 @@ class DavLocation:
 
 # RFC 3986 pchar without "&" and "'", so a checked path needs no XML escaping.
 _PATH_RE = re.compile(r"/(?:[A-Za-z0-9\-._~!$()*+,;=:@/]|%[0-9A-Fa-f]{2})*")
-_URL_RE = re.compile(r"[Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9.-]{1,253})(?::(\d{1,5}))?(/.*)?", re.S)
+_URL_RE = re.compile(r"[Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9.-]{1,253})(?::([0-9]{1,5}))?(/.*)?", re.S)
 
 
 def check_path(path: object) -> str:
     """Return `path` unchanged if it is a plain absolute path, else raise DavPolicyError."""
-    if not isinstance(path, str) or len(path) > MAX_PATH_CHARS or not _PATH_RE.fullmatch(path):
+    if type(path) is not str or len(path) > MAX_PATH_CHARS or not _PATH_RE.fullmatch(path):
         raise DavPolicyError("path refused by read-only guard")
     if "//" in path:
         raise DavPolicyError("path refused by read-only guard")
@@ -145,7 +145,7 @@ def resolve(ref: object, base_host: str, hosts: DavHosts, port: int) -> DavLocat
     Accepts an absolute path (on `base_host`) or an https URL; nothing relative. "&" and
     "'" are legal in a path but refused by check_path (so no path needs XML escaping); they
     are percent-encoded here, which a server decodes to the same path."""
-    if not isinstance(ref, str):
+    if type(ref) is not str:
         raise DavPolicyError("href refused by read-only guard")
     ref = ref.strip().replace("&", "%26").replace("'", "%27")
     if ref.startswith("/"):
@@ -236,7 +236,7 @@ def check_request(method: object, path: object, body: object) -> str | None:
     """The Depth header for (method, path, body) if this module built that request, else
     DavPolicyError. None for a multiget: RFC 6352 section 8.7 and RFC 4791 section 7.9 say
     the client should not send Depth there. Error messages never include the request."""
-    if method not in ALLOWED_METHODS:
+    if type(method) is not str or method not in ALLOWED_METHODS:
         raise DavPolicyError("DAV method refused by read-only guard")
     check_path(path)
     if type(body) is not bytes:
@@ -300,7 +300,7 @@ class GuardedDAVConnection(http.client.HTTPSConnection):
             raise DavPolicyError("host refused by read-only guard")
         if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
             raise DavPolicyError("TLS certificate and hostname verification must be enabled")
-        if not isinstance(authorization, str) or not _AUTH_RE.fullmatch(authorization):
+        if type(authorization) is not str or not _AUTH_RE.fullmatch(authorization):
             raise DavPolicyError("unsupported authorization")
         super().__init__(host, port, timeout=timeout, context=context)
         self._hosts = hosts
@@ -362,7 +362,13 @@ class GuardedDAVConnection(http.client.HTTPSConnection):
 
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         p = self._pending
-        if p is None or p.started or method != p.method or url != p.path:
+        if (
+            p is None
+            or p.started
+            or type(method) is not str
+            or type(url) is not str
+            or (method, url) != (p.method, p.path)
+        ):
             self._refuse("DAV request line")
         p.started = True
         super().putrequest(method, url, skip_host=True, skip_accept_encoding=True)
@@ -374,6 +380,7 @@ class GuardedDAVConnection(http.client.HTTPSConnection):
             or not p.started
             or p.unsent is not None
             or p.headers_put >= len(p.headers)
+            or not all(type(x) is str for x in (header, *values))
             or (header, values) != (p.headers[p.headers_put][0], (p.headers[p.headers_put][1],))
         ):
             self._refuse("DAV request header")
@@ -425,7 +432,7 @@ _CARD = "{urn:ietf:params:xml:ns:carddav}"
 _CAL = "{urn:ietf:params:xml:ns:caldav}"
 _CS = "{http://calendarserver.org/ns/}"
 _SHORT_NS = (_D, _CARD, _CAL)
-_STATUS_RE = re.compile(r"HTTP/\d(?:\.\d)? (\d{3})(?: .*)?", re.S)
+_STATUS_RE = re.compile(r"HTTP/[0-9](?:\.[0-9])? ([0-9]{3})(?: .*)?", re.S)
 
 
 @dataclass(frozen=True)

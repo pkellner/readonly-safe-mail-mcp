@@ -69,7 +69,7 @@ class FakeDAVServer:
         self.routes: dict[tuple[str | None, str, str], Route] = {}
         self.requests: list[Request] = []
         self.received = bytearray()
-        self.connections = 0
+        self.connections = 0  # counted at accept, before TLS: every connection the client opened
         self._lock = threading.Lock()
         self._ssl = ssl_context
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -113,14 +113,14 @@ class FakeDAVServer:
             if self._stopping:
                 conn.close()
                 return
+            with self._lock:
+                self.connections += 1
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn) -> None:
         try:
             conn.settimeout(10)
             conn = self._ssl.wrap_socket(conn, server_side=True)
-            with self._lock:
-                self.connections += 1
             self._session(conn)
         except (OSError, ssl.SSLError, ValueError):
             pass

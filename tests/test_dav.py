@@ -470,6 +470,9 @@ def test_icloud_hosts_allowed(host):
         "",
         None,
         b"contacts.icloud.com",
+        "p\u0663-contacts.icloud.com",  # Arabic-Indic digit three
+        "p\uff10\uff17-contacts.icloud.com",  # fullwidth 07
+        "p0\u0967-caldav.icloud.com",  # Devanagari digit one
     ],
 )
 def test_other_hosts_refused(host):
@@ -596,6 +599,7 @@ def test_foreign_redirect_refused_and_no_authorization_leaves(server, src, kind,
         src.principal("contacts")
     assert [(r.host, r.method, r.path) for r in server.requests] == [(CONTACTS, "PROPFIND", "/")]
     assert all(HOSTS.allows(r.host) for r in server.requests)
+    assert server.connections == 1  # no second connection, not even one that sends nothing
 
 
 @pytest.mark.parametrize("status", [301, 302, 307, 308])
@@ -631,6 +635,7 @@ def test_principal_on_foreign_host_refused(server, src):
     with pytest.raises(DavPolicyError):
         src.home("contacts")
     assert [r.host for r in server.requests] == [CONTACTS]
+    assert server.connections == 1
 
 
 def test_home_set_on_foreign_host_refused(server, src):
@@ -645,6 +650,7 @@ def test_home_set_on_foreign_host_refused(server, src):
     with pytest.raises(DavPolicyError):
         src.home("contacts")
     assert [r.host for r in server.requests] == [CONTACTS, CONTACTS]
+    assert server.connections == 1
 
 
 def test_listing_entry_on_another_host_refused(server, src):
@@ -652,6 +658,7 @@ def test_listing_entry_on_another_host_refused(server, src):
     server.on("PROPFIND", "/1/h/", Reply(207, multistatus(entry(server.url(P_CONTACTS, "/1/h/ab/")))))
     with pytest.raises(DavError):
         src.collections(home)
+    assert [r.host for r in server.requests] == [CONTACTS] and server.connections == 1
 
 
 def test_multiget_outside_collection_refused_at_source(server, src):
@@ -1068,3 +1075,88 @@ def test_over_the_cap_is_its_own_error(server, ctx):
 def test_hosts_base_names_the_partition_hosts_of_one_provider():
     assert HOSTS.base(P_CALDAV) == HOSTS.base(CALDAV) == CALDAV
     assert HOSTS.base(P_CONTACTS) == CONTACTS and HOSTS.base(FOREIGN) is None and HOSTS.base(None) is None
+
+
+# --- review fixes (issue #1, R2): ASCII-only patterns, exact str types --------------------------
+
+
+@pytest.mark.parametrize("port", ["\u0664\u0664\u0663", "\uff14\uff14\uff13"])
+def test_url_port_in_other_digits_refused(port):
+    with pytest.raises(DavPolicyError):
+        resolve(f"https://{CONTACTS}:{port}/x/", CONTACTS, HOSTS, 443)
+
+
+def test_status_in_other_digits_is_malformed():
+    body = (
+        b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/</d:href>'
+        + "<d:status>HTTP/1.1 \u0662\u0660\u0660 OK</d:status>".encode()
+        + b"</d:response></d:multistatus>"
+    )
+    with pytest.raises(DavError, match="malformed status"):
+        parse_multistatus(body, ORIGIN, HOSTS, 443)
+
+
+class Sneaky(str):
+    """Equal to the text it was built from, but formats and prints as a write."""
+
+    def __str__(self):
+        return "DELETE"
+
+    def __format__(self, spec):
+        return "DELETE"
+
+
+class Lenient(str):
+    """Equal to everything."""
+
+    def __eq__(self, other):
+        return True
+
+    __hash__ = str.__hash__
+
+
+@pytest.mark.parametrize("cls", [Sneaky, Lenient])
+def test_str_subclasses_refused_by_the_checks(cls):
+    with pytest.raises(DavPolicyError):
+        check_request(cls("PROPFIND"), "/", BODY_PRINCIPAL)
+    with pytest.raises(DavPolicyError):
+        check_request("PROPFIND", cls("/"), BODY_PRINCIPAL)
+    with pytest.raises(DavPolicyError):
+        check_path(cls("/"))
+    with pytest.raises(DavPolicyError):
+        resolve(cls("/x/"), CONTACTS, HOSTS, 443)
+    assert not HOSTS.allows(cls(CONTACTS))
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.request(Sneaky("PROPFIND"), "/", BODY_PRINCIPAL),
+        lambda c: c.request("PROPFIND", Sneaky("/"), BODY_PRINCIPAL),
+        lambda c: c.request(Lenient("DELETE"), "/", BODY_PRINCIPAL),
+    ],
+    ids=["method-formats-as-delete", "path-formats-as-delete", "method-equal-to-anything"],
+)
+def test_str_subclass_request_refused_and_nothing_sent(server, ctx, call):
+    conn = connect(server, ctx)
+    with pytest.raises(DavPolicyError):
+        call(conn)
+    assert_nothing_sent(server)
+
+
+def test_str_subclass_in_a_validated_request_refused(server, ctx):
+    conn = connect(server, ctx)
+    conn._pending = conn._validate("PROPFIND", "/", BODY_PRINCIPAL, None, False)
+    with pytest.raises(DavPolicyError):
+        conn.putrequest(Sneaky("PROPFIND"), "/")
+    conn._pending = conn._validate("PROPFIND", "/", BODY_PRINCIPAL, None, False)
+    conn.putrequest("PROPFIND", "/")
+    host = conn._pending.headers[0]
+    with pytest.raises(DavPolicyError):
+        conn.putheader(Sneaky(host[0]), host[1])
+    assert_nothing_sent(server)
+
+
+def test_str_subclass_authorization_refused(ctx):
+    with pytest.raises(DavPolicyError):
+        GuardedDAVConnection(CONTACTS, 443, hosts=HOSTS, authorization=Sneaky(AUTH), context=ctx)

@@ -32,7 +32,7 @@ from .fieldpolicy import FIELD_POLICY_VERSION, ContactFields, Item, phone_digits
 if TYPE_CHECKING:
     from .caltime import Built, ParsedEvent
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 PREFIX = "dav"
 CONTACTS = "contacts"
 CALENDARS = "calendars"
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS events (
   attendees_omitted INTEGER NOT NULL DEFAULT 0,
   people TEXT NOT NULL DEFAULT '',  -- organizer and attendee names and addresses, for search
   status TEXT NOT NULL DEFAULT '', cancelled INTEGER NOT NULL DEFAULT 0,
-  invitation INTEGER NOT NULL DEFAULT 0,  -- an invitation the user has not accepted
+  invitation TEXT NOT NULL DEFAULT '',  -- 'not accepted', 'acceptance unknown' or ''
   dropped TEXT NOT NULL DEFAULT '[]', notes TEXT NOT NULL DEFAULT '[]',
   timing TEXT NOT NULL,  -- JSON: caltime.event_timing's validated values, never iCalendar text
   incomplete TEXT NOT NULL DEFAULT '',  -- why the timing is not fully understood; '' when it is
@@ -362,7 +362,7 @@ def store_object(
                 " ".join(x for p in people for x in (p.name, p.address) if x),
                 f.status,
                 int(f.cancelled),
-                int(f.invitation_not_accepted),
+                f.invitation,
                 json.dumps(list(f.dropped)),
                 json.dumps(list(f.notes)),
                 json.dumps(ev.timing),

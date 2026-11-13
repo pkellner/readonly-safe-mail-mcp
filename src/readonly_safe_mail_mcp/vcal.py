@@ -27,13 +27,13 @@ class VParseError(ValueError):
 
 
 def _unfold(text: str) -> list[str]:
-    lines: list[str] = []
+    lines: list[list[str]] = []
     for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if raw[:1] in (" ", "\t") and lines:
-            lines[-1] += raw[1:]
+            lines[-1].append(raw[1:])
         else:
-            lines.append(raw)
-    return lines
+            lines.append([raw])
+    return ["".join(parts) for parts in lines]
 
 
 def _split_unquoted(s: str, sep: str) -> list[str]:

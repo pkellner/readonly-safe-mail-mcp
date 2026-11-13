@@ -267,13 +267,16 @@ server receives and assert that none of them arrives.
 **What the assistant sees.**
 - **Contacts:** names, organisations, emails, birthdays, and phone numbers and postal
   addresses. Phones and addresses are shown on purpose, the one place the usual redaction
-  of digits is switched off: a contact is only useful with them. They still go to your AI
+  of digits is switched off: a contact is only useful with them. A number in a phone field,
+  or in an address, is therefore shown even if it is really a code (see the
+  [threat model](docs/THREAT_MODEL.md#contacts-and-calendars) for the exact shapes kept). They still go to your AI
   provider, so turn contacts on only if you accept that. Notes get the full mail redaction
   (links, codes, security keywords). Websites, photos and messaging handles are not shown.
 - **Calendar:** title, time, place, people (at most 30) and description, redacted the same
   way; a description is withheld if it looks security-related. Alarms, attachments and
   conference links are not shown. Cancelled events and invitations you have not accepted
-  are kept and labelled.
+  are kept and labelled; an invitation in which your address is not found is labelled
+  "(invitation, acceptance unknown)".
 - Calendar text is written by strangers (anyone can send an invitation), so every result
   is labelled untrusted content, and repeat rules are expanded in a separate limited
   process, not in the server (see the [threat model](docs/THREAT_MODEL.md#contacts-and-calendars)).
@@ -305,7 +308,8 @@ sync.
   may wait for the next sync; `status` says how many ("pending expansion").
 - An event's id changes when the event changes on the server.
 - "Invitation, not accepted" is matched against your account's username only, not your other
-  addresses.
+  addresses: an invitation sent to an alias reads "(invitation, acceptance unknown)". So does
+  an event in a calendar someone shares with you, when it has attendees and you are not one.
 - Reminders (to-dos), journals and contact photos are not read. Only iCloud is the intended
   target; Fastmail and Yahoo use the same protocols, with hosts built in, and are unchecked.
 

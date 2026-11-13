@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from readonly_safe_mail_mcp import vcal
@@ -124,6 +126,16 @@ def test_unfold_and_time():
     assert _ics_time("20260303T090000Z") == "2026-03-03 09:00 UTC"
     assert _ics_time("20260303") == "2026-03-03"
     assert _ics_time("junk") == "junk"
+
+
+def test_unfold_is_linear_in_the_number_of_continuation_lines():
+    # 1.5 million continuation lines, under the 5M-character input cap. Joining onto the
+    # previous line each time took about 25 s here; one join per line takes well under 1 s.
+    text = "DESCRIPTION:" + "\n x" * 1_500_000
+    start = time.perf_counter()
+    lines = _unfold(text)
+    assert time.perf_counter() - start < 3
+    assert lines == ["DESCRIPTION:" + "x" * 1_500_000]
 
 
 def test_attachment_rendering_unchanged_for_vcf():
