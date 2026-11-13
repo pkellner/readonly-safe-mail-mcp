@@ -245,7 +245,8 @@ same app-specific password is used; `check` tests the login):
 ```yaml
 accounts:
   icloud: { preset: icloud, username: you@icloud.com, contacts: true, calendars: true }
-  # only some calendars, by name (default: all):
+  # only some calendars, by name (default: all; case and spacing ignored; `check` lists
+  # names that match no calendar):
   # icloud: { ..., calendars: { allow: [Home, Work], deny: [Birthdays] } }
 calendar_years: 10    # years of calendar indexed before and after this month (1 to 50)
 ```
@@ -293,6 +294,13 @@ sync.
 - **Outlook invitations** often carry Windows time-zone names ("Pacific Standard Time"), not
   standard ones. Those events are read as floating times (your Mac's own zone), labelled
   "(floating)" and marked incomplete.
+- **On Windows**, your machine's own time zone is read with today's daylight-saving rule for
+  every year, so floating and all-day times in a year whose rule differed can be an hour
+  off near the change. Repeat rules there are bounded only by the time limit on the whole
+  expansion process, not per event.
+- **A failing contacts or calendar sync** (a wrong password, say) is tried again at most
+  once per sync interval, so the provider does not see a login attempt at every question.
+  Answers from data older than the interval say so.
 - **Repeating events** are expanded in batches under a time budget. After a large change some
   may wait for the next sync; `status` says how many ("pending expansion").
 - An event's id changes when the event changes on the server.

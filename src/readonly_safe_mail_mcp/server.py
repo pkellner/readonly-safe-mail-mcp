@@ -156,6 +156,9 @@ def build_server() -> MCPServer:
         words = davindex.source_words(cfg)
         if dav_runner.running and words:
             lines.append(f"A {words} sync is running now.")
+        # A DAV error can name an address book or calendar: text the server supplied.
+        failed = {st.source for st in statuses if q.failed(st)}
+        lines += [_SOURCE_TEXT[s][2] for s in _SOURCE_TEXT if s in failed]
         return "\n".join(lines)
 
     @mcp.tool(annotations=READ_ONLY, structured_output=False)
@@ -177,7 +180,7 @@ def build_server() -> MCPServer:
         One line per hit: #id | account | date | from | subject | snippet."""
         cfg = _config()
         fp = index.fingerprint(cfg)
-        notes = await _maybe_sync(cfg, ctx)
+        notes = await _mail_sync(cfg, ctx)
         db = _open(cfg)
         if db is None:
             return NO_INDEX
@@ -204,8 +207,32 @@ def build_server() -> MCPServer:
         body = "\n".join(hits) if hits else "No matches."
         return "\n".join([q.UNTRUSTED, *notes, body])
 
-    async def _maybe_sync(cfg: Config, ctx: Context) -> list[str]:
-        """Search-triggered sync policy (PLAN.md section 4.3)."""
+    async def _maybe_sync(sync: SyncRunner, cfg: Config, ctx: Context, last: float, waiting: str) -> bool:
+        """Search-triggered sync policy (PLAN.md section 4.3), for mail and for contacts and
+        calendars: a sync starts when `last` is older than the interval, and the call that
+        starts one after a break of twice the interval waits for it, up to MAX_WAIT. True
+        when that wait ran out with the sync still running."""
+        age, interval = time.time() - last, cfg.sync_if_older_than
+        if age < interval:
+            return False
+        started = sync.start(cfg)
+        # Only the search that starts a sync waits for it. While a long sync (e.g. the initial
+        # backfill) is already running, later searches answer immediately from the index.
+        if not started or age < 2 * interval:
+            return False
+        start = time.monotonic()
+        told = False
+        while sync.running and time.monotonic() - start < MAX_WAIT:
+            if not told and time.monotonic() - start >= FIRST_WAIT:
+                told = True
+                try:
+                    await ctx.report_progress(0, None, waiting)
+                except Exception:
+                    pass
+            await anyio.sleep(0.2)
+        return sync.running
+
+    async def _mail_sync(cfg: Config, ctx: Context) -> list[str]:
         db = _open(cfg)
         try:
             stats = _statuses(cfg, db)
@@ -213,27 +240,8 @@ def build_server() -> MCPServer:
             if db:
                 db.close()
         last = min((s.last_success or 0) for s in stats) if stats else 0
-        age, interval = time.time() - last, cfg.sync_if_older_than
-        if age < interval:
-            return []
-        started = runner.start(cfg)
-        # Only the search that starts a sync waits for it. While a long sync (e.g. the initial
-        # backfill) is already running, later searches answer immediately from the index.
-        if not started or age < 2 * interval:
-            return []
-        start = time.monotonic()
-        told = False
-        while runner.running and time.monotonic() - start < MAX_WAIT:
-            if not told and time.monotonic() - start >= FIRST_WAIT:
-                told = True
-                try:
-                    await ctx.report_progress(
-                        0, None, "Syncing new mail (first search after a break; later searches are instant)…"
-                    )
-                except Exception:
-                    pass
-            await anyio.sleep(0.2)
-        if runner.running:
+        waiting = "Syncing new mail (first search after a break; later searches are instant)…"
+        if await _maybe_sync(runner, cfg, ctx, last, waiting):
             return ["Note: continuing with unsynced data; newest mail will appear in your next search."]
         return []
 
@@ -319,16 +327,18 @@ def build_server() -> MCPServer:
         _check_policy(fp)
         return q.UNTRUSTED + "\n" + (sep.join(out) if out else "No matching passages.")
 
-    def _dav(source: str, fn) -> str:
+    async def _dav(source: str, ctx: Context, fn) -> str:
         off, not_synced, untrusted = _SOURCE_TEXT[source]
         cfg = _config()
         fp = davindex.fingerprint(cfg)
         if fp is None or not davindex.dav_accounts(cfg, source):
             return off
         stats = _source_statuses(cfg, source)
-        last = min((s.last_success or 0) for s in stats)
-        if time.time() - last >= cfg.sync_if_older_than:
-            dav_runner.start(cfg)
+        # Mail's policy, but after a failed attempt the next waits the interval from that
+        # attempt, not from the last success: a wrong password is not retried at every call.
+        last = max(min(s.last_success or 0 for s in stats), max(s.last_attempt or 0 for s in stats))
+        await _maybe_sync(dav_runner, cfg, ctx, last, f"Syncing {davindex.source_words(cfg)}…")
+        stats = _source_statuses(cfg, source)
         db = davindex.connect(cfg, create=False)
         if db is None:
             return not_synced
@@ -346,7 +356,8 @@ def build_server() -> MCPServer:
     if contacts:
 
         @mcp.tool(annotations=READ_ONLY, structured_output=False)
-        def search_contacts(
+        async def search_contacts(
+            ctx: Context,
             query: str = "",
             name: str = "",
             org: str = "",
@@ -359,8 +370,9 @@ def build_server() -> MCPServer:
             """Search contacts. query: words in any field (all must match), "exact phrase", OR, NOT,
             prefix*. name/org/email: substring. phone: digits in any format (555 1234 finds (555) 1234).
             One line per hit: #id | account | name | org | email | phone."""
-            return _dav(
+            return await _dav(
                 davindex.CONTACTS,
+                ctx,
                 lambda db, cfg: q.search_contacts(
                     db,
                     query=query,
@@ -375,14 +387,15 @@ def build_server() -> MCPServer:
             )
 
         @mcp.tool(annotations=READ_ONLY, structured_output=False)
-        def read_contact(id: int) -> str:
+        async def read_contact(ctx: Context, id: int) -> str:
             """One contact card (id from search_contacts): phones, emails, addresses, birthday, note."""
-            return _dav(davindex.CONTACTS, lambda db, cfg: [q.read_contact(db, id)])
+            return await _dav(davindex.CONTACTS, ctx, lambda db, cfg: [q.read_contact(db, id)])
 
     if calendars:
 
         @mcp.tool(annotations=READ_ONLY, structured_output=False)
-        def search_events(
+        async def search_events(
+            ctx: Context,
             query: str = "",
             since: str = "",
             until: str = "",
@@ -395,8 +408,9 @@ def build_server() -> MCPServer:
             (neither and no query: from today on). query: words in title, location, description or
             people (all must match), "exact phrase", OR, NOT, prefix*. calendar: substring of its name.
             One line per occurrence: #id | account | when | title | location."""
-            return _dav(
+            return await _dav(
                 davindex.CALENDARS,
+                ctx,
                 lambda db, cfg: q.search_events(
                     db,
                     query=query,
@@ -411,9 +425,9 @@ def build_server() -> MCPServer:
             )
 
         @mcp.tool(annotations=READ_ONLY, structured_output=False)
-        def read_event(id: int) -> str:
+        async def read_event(ctx: Context, id: int) -> str:
             """One event (id from search_events): time, repeat rule, location, people, description."""
-            return _dav(davindex.CALENDARS, lambda db, cfg: [q.read_event(db, id)])
+            return await _dav(davindex.CALENDARS, ctx, lambda db, cfg: [q.read_event(db, id)])
 
     return mcp
 

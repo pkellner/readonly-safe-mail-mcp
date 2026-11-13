@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -25,6 +26,10 @@ from .config import Config
 from .sanitize import SANITIZER_VERSION, SanitizedMessage
 
 SCHEMA_VERSION = "1"
+# The umask is per process and the mail and DAV syncs open index files from two threads:
+# one at a time, or one thread could restore the other's 0o077 as the lasting umask, or
+# create its file under the wider one.
+_UMASK_LOCK = threading.Lock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -121,18 +126,19 @@ def connect(path: Path, *, create: bool, schema: str = SCHEMA) -> sqlite3.Connec
         return None
     if create:
         ensure_data_dir(path.parent)
-    old = os.umask(0o077)  # owner-only for the db and its -wal/-shm files
-    try:
-        db = sqlite3.connect(path, timeout=30, check_same_thread=False)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA busy_timeout=30000")
-        if create:
-            db.executescript(schema)
-            db.execute("INSERT OR IGNORE INTO meta VALUES ('created', ?)", (str(time.time()),))
-            db.commit()
-    finally:
-        os.umask(old)
+    with _UMASK_LOCK:
+        old = os.umask(0o077)  # owner-only for the db and its -wal/-shm files
+        try:
+            db = sqlite3.connect(path, timeout=30, check_same_thread=False)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA busy_timeout=30000")
+            if create:
+                db.executescript(schema)
+                db.execute("INSERT OR IGNORE INTO meta VALUES ('created', ?)", (str(time.time()),))
+                db.commit()
+        finally:
+            os.umask(old)
     for p in path.parent.glob(path.name + "*"):
         os.chmod(p, 0o600)
     return db

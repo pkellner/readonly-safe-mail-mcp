@@ -2,6 +2,7 @@
 
 import http.client
 import io
+import time
 
 import fakedav
 import pytest
@@ -982,3 +983,88 @@ def test_whole_flow_reuses_one_connection_per_host(server, src):
     assert [i.href for i in src.collections(home)] == [home.path + "card/"]
     assert server.connections == 2
     assert [r.header("Authorization") for r in server.requests] == [AUTH] * 3
+
+
+# --- review fixes (issue #1, R1) ------------------------------------------------------
+
+
+@pytest.mark.parametrize("method", ["etags", "collections"])
+def test_listing_marked_truncated_on_its_own_entry_is_incomplete(server, src, method):
+    """507 on the collection's own entry marks a truncated multistatus: the one child listed
+    is not all of them, so the listing must not read as complete."""
+    col = DavLocation(CONTACTS, "/ab/")
+    server.on(
+        "PROPFIND", col.path, Reply(207, multistatus(status_entry(col.path, status=507), entry("/ab/1.vcf")))
+    )
+    with pytest.raises(dav.DavIncomplete, match="incomplete"):
+        getattr(src, method)(col)
+
+
+def test_listing_own_entry_without_its_properties_is_complete(server, src):
+    col = DavLocation(CONTACTS, "/ab/")
+    server.on(
+        "PROPFIND",
+        col.path,
+        Reply(207, multistatus(entry(col.path, status=404), entry("/ab/1.vcf", fakedav.etag('"1"')))),
+    )
+    assert [i.href for i in src.etags(col)] == ["/ab/1.vcf"]
+
+
+def test_resourcetype_only_from_a_200_propstat():
+    gone, empty = parse(
+        multistatus(
+            entry("/ab/x/", fakedav.displayname("X"), missing=(fakedav.resourcetype("d:collection"),)),
+            entry("/ab/y.vcf", fakedav.resourcetype()),
+        )
+    )
+    assert gone.status == 200 and gone.resource_types is None and gone.entry_status is None
+    assert empty.resource_types == ()
+
+
+def test_dripping_response_stops_at_the_deadline(server, src, monkeypatch):
+    """A server sending one byte at a time cannot hold the DAV thread past the deadline:
+    read(n) would wait for n bytes or the end before the deadline is checked again."""
+    monkeypatch.setattr(dav, "MAX_RESPONSE_SECONDS", 0.3)
+    server.on("PROPFIND", "/", Reply(207, _padded(400), drip=0.01))
+    t0 = time.monotonic()
+    with pytest.raises(DavError, match="took too long"):
+        src.principal("contacts")
+    assert time.monotonic() - t0 < 2  # the whole body would take 4 s
+
+
+@pytest.mark.parametrize("name,encoded", [("a&b.vcf", "a%26b.vcf"), ("o'neil.vcf", "o%27neil.vcf")])
+def test_href_with_ampersand_or_apostrophe_is_read(server, src, name, encoded):
+    """Both are legal unencoded in a path; they are percent-encoded, so the guard's path
+    check and the XML-safe multiget body still hold."""
+    col = DavLocation(CONTACTS, "/ab/")
+    assert resolve("/ab/" + name, CONTACTS, HOSTS, 443) == DavLocation(CONTACTS, "/ab/" + encoded)
+    server.on(
+        "PROPFIND",
+        col.path,
+        Reply(207, multistatus(entry(col.path), entry("/ab/" + name, fakedav.etag('"1"')))),
+    )
+    [item] = src.etags(col)
+    assert item.href == "/ab/" + encoded
+    body = multiget_body("contacts", col.path, [item.href])
+    assert check_request("REPORT", col.path, body) is None and b"&" not in body and b"'" not in body
+    server.on(
+        "REPORT",
+        col.path,
+        Reply(207, multistatus(entry("/ab/" + name, fakedav.etag('"1"'), fakedav.address_data(VCARD)))),
+    )
+    [got] = src.multiget("contacts", col, [item.href])
+    assert (got.href, got.status) == ("/ab/" + encoded, 200)
+
+
+def test_over_the_cap_is_its_own_error(server, ctx):
+    server.on("PROPFIND", "/", Reply(207, _padded(CAP + 1)))
+    with server.source(ctx, max_response_bytes=CAP) as s, pytest.raises(dav.DavTooLarge):
+        s.principal("contacts")
+    server.on("PROPFIND", "/", Reply(207, b"<x/>", declared_length=10**12))
+    with server.source(ctx, max_response_bytes=CAP) as s, pytest.raises(dav.DavTooLarge):
+        s.principal("contacts")
+
+
+def test_hosts_base_names_the_partition_hosts_of_one_provider():
+    assert HOSTS.base(P_CALDAV) == HOSTS.base(CALDAV) == CALDAV
+    assert HOSTS.base(P_CONTACTS) == CONTACTS and HOSTS.base(FOREIGN) is None and HOSTS.base(None) is None

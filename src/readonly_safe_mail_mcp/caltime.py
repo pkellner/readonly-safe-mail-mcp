@@ -9,7 +9,11 @@ name it (query.py), so it never makes a date search look empty.
 Occurrences are derived data: rebuilt from the stored timing with no network request
 whenever the window, the machine's zone or EXPANDER_VERSION changes. Repeating events are
 expanded in the worker child (expand.py) in batches with deadlines and one time budget per
-sync; the rest is pending until the next sync.
+sync; the rest is pending until the next sync. What bounds an event is the worker's time
+limit per event (POSIX) and the wall-clock kill of its child; the caps on the values it
+gets do not, since a rule that never matches runs to the year 9999 without yielding.
+A worker that gives no usable answer stops the pass: its events stay pending and the
+calendar source records the error, rather than each event being blamed for it.
 
 Values in `timing` are tagged strings: "2026-03-02" (a date), "2026-03-02T09:00:00|<zone>"
 where <zone> is "UTC", an IANA key, or empty for floating time (read in the machine's zone).
@@ -18,6 +22,7 @@ where <zone> is "UTC", an IANA key, or empty for floating time (read in the mach
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import sys
@@ -32,12 +37,20 @@ from .config import Account
 from .fieldpolicy import EventFields, event_fields
 from .vcal import Prop, VEvent, parse_icalendar
 
+log = logging.getLogger(__name__)
+
 # Bump whenever the occurrences built from the same timing could change.
 EXPANDER_VERSION = "1"
+# Bump whenever event_timing (or the parser under it) could read the same iCalendar text
+# differently. It is in the second file's fingerprint, so every calendar item is fetched
+# and read again: the raw text is never stored. 2: no start, unknown ends, floating values.
+TIMING_VERSION = "2"
 EXPAND_WORKER = "readonly_safe_mail_mcp.expand"
 BATCH = 200
-BATCH_SECONDS = 10.0
-SINGLE_SECONDS = 2.0
+START_SECONDS = 10.0  # the worker's start, measured once per pass; longer stops the pass
+BATCH_SECONDS = 10.0  # a batch's deadline after the worker's start
+SINGLE_SECONDS = 2.0  # one event's deadline after the worker's start
+EVENT_SECONDS = 1.0  # the worker's own limit per event (POSIX), inside SINGLE_SECONDS
 BUDGET_SECONDS = 60.0
 WORKER_CPU_SECONDS = 15
 MAX_DATES = 2_000  # RDATE values, and EXDATE values, per event
@@ -104,6 +117,8 @@ class Expansion:
 
     batch_seconds: float = BATCH_SECONDS
     single_seconds: float = SINGLE_SECONDS
+    event_seconds: float = EVENT_SECONDS
+    start_seconds: float = START_SECONDS
     budget_seconds: float = BUDGET_SECONDS
     runner: isolate.Runner | None = None  # None: expand.py, sandboxed where a sandbox exists
     today: Callable[[], date] = date.today
@@ -327,10 +342,13 @@ def _day(tagged: str) -> date:
 def event_timing(ev: VEvent) -> dict:
     """The validated timing of one VEVENT: `incomplete` lists what could not be fully
     understood (empty when complete); `repeat` says whether the worker expands it;
-    `last_start` is the latest possible start, None when unbounded or unknown."""
+    `last_start` is the latest possible start, None when unbounded or unknown (also when
+    the end is unknown, so the last day it touches is)."""
     reasons: set[str] = set()
     start = _one(ev.all("DTSTART"), reasons, "start")
     rid_props = ev.all("RECURRENCE-ID")
+    if not ev.all("DTSTART") and not rid_props:
+        reasons.add("no start")
     rid = _one(rid_props, reasons, "RECURRENCE-ID")
     if start is None and rid is not None and not ev.all("DTSTART"):
         start = rid  # an override without its own DTSTART keeps the original time
@@ -390,6 +408,8 @@ def event_timing(ev: VEvent) -> dict:
             timing[key] = values
     if last is not None and timing["rdates"]:
         last = [*last, *timing["rdates"]]
+    if {"end could not be read", "RANGE=THISANDFUTURE is not supported"} & reasons:
+        last = None  # how far it reaches is unknown: named in every later search
     timing["repeat"] = expandable
     timing["last_start"] = max(last, key=_day) if last else None
     timing["incomplete"] = sorted(reasons)
@@ -477,11 +497,21 @@ def _wall_in(tagged: str, zone_key: str | None, start_wall: datetime | date, loc
     if vzone is None:  # a date in a timed event: the start's time of day that date
         assert isinstance(start_wall, datetime)
         return datetime.combine(value, start_wall.time()).isoformat()
-    if vzone != zone_key:
+    if vzone and vzone != zone_key:  # a floating value is in the start's zone, as UNTIL is
         value = (
             value.replace(tzinfo=_zone(vzone, local)).astimezone(_zone(zone_key, local)).replace(tzinfo=None)
         )
     return value.isoformat()
+
+
+def _until_in(tagged: str, zone_key: str | None, start_wall: datetime | date, local: tzinfo) -> str:
+    """UNTIL, an instant: on an all-day event, the last day whose midnight (the machine's,
+    where all-day days are placed) is not after it."""
+    value, vzone = _split(tagged)
+    if zone_key is None and vzone is not None:
+        assert isinstance(value, datetime)
+        return value.replace(tzinfo=_zone(vzone, local)).astimezone(local).date().isoformat()
+    return _wall_in(tagged, zone_key, start_wall, local)
 
 
 def _exdate_in(tagged: str, zone_key: str | None, start_wall, local: tzinfo) -> str:
@@ -570,10 +600,12 @@ def _store(
     db: sqlite3.Connection, eid: int, timing: dict, starts, win: Window, local, key: str, problem: str
 ) -> None:
     """Store one event's occurrences. Dates that cannot be computed (an overflow near the
-    year 9999, say) mark that event alone incomplete, named in every search."""
+    year 9999, a zone missing from the time-zone database, say) mark that event alone
+    incomplete, named in every search."""
     try:
         built = build(timing, starts, win, local)
-    except (ValueError, OverflowError, OSError):
+    except Exception as e:  # this event only: the pass goes on
+        log.warning("one event's dates could not be computed (%s)", type(e).__name__, exc_info=True)
         built, problem = _NO_DATES, problem or "dates could not be computed"
     davindex.store_occurrences(db, eid, built, key, problem)
 
@@ -589,7 +621,7 @@ def worker_request(eid: int, timing: dict, win: Window, local: tzinfo) -> dict:
     before = datetime.combine(win.end + timedelta(days=PAD_DAYS), datetime.min.time())
     rule = dict(timing["rule"]) if timing["rule"] else None
     if rule and "until" in rule:
-        rule["until"] = _wall_in(rule["until"], zone_key, start_wall, local)
+        rule["until"] = _until_in(rule["until"], zone_key, start_wall, local)
     return {
         "id": eid,
         "start": start_wall.isoformat(),
@@ -623,16 +655,27 @@ class Progress:
     key: str
     expanded: int = 0
     pending: int = 0
+    stopped: str | None = None  # why the pass stopped with the worker giving no usable answer
 
 
-def _ask(runner: isolate.Runner, reqs: list[dict], seconds: float) -> dict[int, list[str] | str]:
-    """{event id: starts, or the reason it could not be expanded}. Raises WorkerError."""
+class _RequestFailed(Exception):
+    """The worker answered that the request as a whole failed ("ok": false)."""
+
+
+def _ask(
+    runner: isolate.Runner, reqs: list[dict], seconds: float, event_seconds: float
+) -> dict[int, list[str] | str]:
+    """{event id: starts, or the reason it could not be expanded}. Raises WorkerError when
+    the worker gives no usable answer, _RequestFailed when it says the request failed."""
+    request = {"events": reqs, "event_seconds": event_seconds}
     reply = isolate.call_worker(
-        runner, json.dumps({"events": reqs}).encode(), timeout=seconds, cpu_seconds=WORKER_CPU_SECONDS
+        runner, json.dumps(request).encode(), timeout=seconds, cpu_seconds=WORKER_CPU_SECONDS
     )
+    if not reply["ok"]:
+        raise _RequestFailed
     results = reply.get("results")
-    if not reply["ok"] or not isinstance(results, list):
-        raise isolate.WorkerError("expansion failed")
+    if not isinstance(results, list):
+        raise isolate.WorkerError("expansion answer malformed")
     by_req = {r["id"]: r for r in reqs}
     out: dict[int, list[str] | str] = {}
     for res in results:
@@ -649,6 +692,83 @@ def _ask(runner: isolate.Runner, reqs: list[dict], seconds: float) -> dict[int, 
     if set(out) != set(by_req):
         raise isolate.WorkerError("expansion answer incomplete")
     return out
+
+
+def _stop(progress: Progress, why: object) -> None:
+    progress.stopped = f"calendar expansion stopped (worker: {why}); repeating events wait for the next sync"
+    log.warning("%s", progress.stopped)
+
+
+def _expand_repeating(
+    db: sqlite3.Connection,
+    repeating: list,
+    win: Window,
+    local: tzinfo,
+    key: str,
+    exp: Expansion,
+    progress: Progress,
+) -> None:
+    """Repeating events through the worker, within exp's budget. An event is blamed only
+    for what the worker said about it, or for a lone retry of it killed at its deadline;
+    the worker's start is measured first and not counted against any event."""
+    runner = exp.runner or isolate.find_runner("ask-unsandboxed", EXPAND_WORKER)
+    started = exp.clock()
+
+    def fits(seconds: float) -> bool:
+        return exp.clock() - started + seconds <= exp.budget_seconds
+
+    t0 = time.monotonic()
+    try:
+        _ask(runner, [], exp.start_seconds, exp.event_seconds)
+    except isolate.WorkerError as e:
+        return _stop(progress, e)
+    except _RequestFailed:
+        return _stop(progress, "refused an empty request")
+    start_cost = time.monotonic() - t0
+    for i in range(0, len(repeating), BATCH):
+        batch = repeating[i : i + BATCH]
+        if not fits(start_cost + exp.batch_seconds):
+            break
+        reqs, answers = {}, {}
+        for eid, t in batch:
+            try:
+                reqs[eid] = worker_request(eid, t, win, local)
+            except Exception as e:  # this event only: the pass goes on
+                log.warning("one event's dates could not be computed (%s)", type(e).__name__, exc_info=True)
+                answers[eid] = "dates could not be computed"
+        out_of_time = False
+        try:
+            answers.update(
+                _ask(runner, list(reqs.values()), start_cost + exp.batch_seconds, exp.event_seconds)
+                if reqs
+                else {}
+            )
+        except (isolate.WorkerError, _RequestFailed):
+            for eid in reqs:
+                if not fits(start_cost + exp.single_seconds):
+                    out_of_time = True
+                    break
+                try:
+                    answers.update(
+                        _ask(runner, [reqs[eid]], start_cost + exp.single_seconds, exp.event_seconds)
+                    )
+                except isolate.WorkerTimeout:
+                    answers[eid] = "repeat rule took too long to expand"
+                except _RequestFailed:
+                    answers[eid] = "repeat rule could not be expanded"
+                except isolate.WorkerError as e:
+                    _stop(progress, e)
+                    break
+        for eid, timing in batch:
+            if eid not in answers:
+                continue
+            a = answers[eid]
+            starts, problem = (a, "") if isinstance(a, list) else (None, a)
+            _store(db, eid, timing, starts, win, local, key, problem)
+            progress.expanded += 1
+        db.commit()
+        if out_of_time or progress.stopped:
+            break
 
 
 def expand_pending(db: sqlite3.Connection, years: int, exp: Expansion) -> Progress:
@@ -670,45 +790,6 @@ def expand_pending(db: sqlite3.Connection, years: int, exp: Expansion) -> Progre
             progress.expanded += 1
     db.commit()
     if repeating:
-        runner = exp.runner or isolate.find_runner("ask-unsandboxed", EXPAND_WORKER)
-        started = exp.clock()
-
-        def fits(seconds: float) -> bool:
-            return exp.clock() - started + seconds <= exp.budget_seconds
-
-        for i in range(0, len(repeating), BATCH):
-            batch = repeating[i : i + BATCH]
-            if not fits(exp.batch_seconds):
-                break
-            reqs, answers = {}, {}
-            for eid, t in batch:
-                try:
-                    reqs[eid] = worker_request(eid, t, win, local)
-                except (ValueError, OverflowError, OSError):
-                    answers[eid] = "dates could not be computed"
-            out_of_time = False
-            try:
-                answers.update(_ask(runner, list(reqs.values()), exp.batch_seconds) if reqs else {})
-            except isolate.WorkerError:
-                for eid in reqs:
-                    if not fits(exp.single_seconds):
-                        out_of_time = True
-                        break
-                    try:
-                        answers.update(_ask(runner, [reqs[eid]], exp.single_seconds))
-                    except isolate.WorkerTimeout:
-                        answers[eid] = "repeat rule took too long to expand"
-                    except isolate.WorkerError:
-                        answers[eid] = "repeat rule could not be expanded"
-            for eid, timing in batch:
-                if eid not in answers:
-                    continue
-                a = answers[eid]
-                starts, problem = (a, "") if isinstance(a, list) else (None, a)
-                _store(db, eid, timing, starts, win, local, key, problem)
-                progress.expanded += 1
-            db.commit()
-            if out_of_time:
-                break
+        _expand_repeating(db, repeating, win, local, key, exp, progress)
     progress.pending = davindex.count_pending(db, key)
     return progress

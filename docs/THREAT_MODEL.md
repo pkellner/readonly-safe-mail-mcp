@@ -92,21 +92,37 @@ CalDAV), so what follows is about keeping this server from using that.
   still get the mail redaction, and runs of 11 or more digits are masked in every text field.
 - **The expansion worker has limits, and they differ by platform.** Repeat rules are
   expanded in a child process that receives validated values only, never iCalendar text,
-  with an empty environment, no credentials, a wall-clock kill, and bounds in the code (a
+  with an empty environment, no credentials and a wall-clock kill. The values are capped (a
   start of 1900 or later, daily or coarser, `UNTIL` clamped to the window, at most 100,000
-  steps). It runs through the same runner as the attachment worker. Where that runner can
-  sandbox (macOS `sandbox-exec`, Linux `bwrap`), it has no network, no file writes and no
-  access to your files, config or index. On macOS and Linux it also has a CPU limit.
-  Elsewhere it is a plain child process, which is **not a sandbox**, with the same limits;
-  on Windows there is no CPU limit, only the wall-clock kill. A killed or stuck worker marks the event incomplete; a
-  sync spends at most 60 seconds on expansion, and the contacts and calendar sync takes its
-  own lock after the mail sync has finished, so a stuck expansion never delays mail.
+  occurrences looked at), but the caps alone do not bound the work: a rule that never
+  matches (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`) makes the library search to the year 9999.
+  What bounds it is a time limit per event inside the worker (macOS and Linux: one second,
+  after which that event alone is marked "took too long") and the wall-clock kill of the
+  child, the only bound on Windows. It runs through the same runner as the attachment
+  worker. Where that runner can sandbox (macOS `sandbox-exec`, Linux `bwrap`), it has no
+  network, no file writes and no access to your files, config or index. On macOS and Linux
+  it also has a CPU limit. Elsewhere it is a plain child process, which is **not a
+  sandbox**: on other POSIX systems with the CPU and per-event limits, on Windows with the
+  wall-clock kill only. An event is marked incomplete only for what the worker reports
+  about it, or when it is killed while tried alone; a worker that gives no usable answer
+  at all (it cannot start, say, as when bubblewrap is installed but cannot create its
+  namespaces) marks no event: they wait for the next sync and the calendar source shows
+  the error in `status` and `list_accounts`. A sync spends at most 60 seconds on
+  expansion, and the contacts and calendar sync takes its own lock after the mail sync has
+  finished, so a stuck expansion never delays mail.
 - **Incomplete events are named, not hidden.** An event whose timing the server cannot fully
   place is kept, indexed at its first occurrence and named in every date search it could
   touch, so a gap never reads as a free day. Windows time-zone names (common in Outlook
-  invitations) are read as floating time and marked incomplete.
+  invitations) are read as floating time and marked incomplete. On Windows the machine's
+  own zone, used for floating and all-day times and for every time shown, comes from the
+  registry's current rule, which is applied to every year: in a year whose daylight-saving
+  dates differed, such times are shown an hour off near the change.
+- **Calendars are chosen by name.** `calendars: { allow, deny }` compares names ignoring
+  case, accents and spacing; a name that matches no calendar is listed by `check`, since a
+  mistyped `deny` would leave that calendar indexed.
 - **Second index file.** `dav-*.sqlite`, beside the mail index, is named by its own
-  fingerprint (field policy version, hosts, rules, which sources are on) and has the same
+  fingerprint (field policy version, the calendar timing parser's version, hosts, rules,
+  which sources are on) and has the same
   owner-only modes and generations; a policy change selects a new, empty file. A DAV
   failure is recorded and never fails the mail sync.
 - **Not checked against a live account yet.** The DAV guard and sync are tested against a

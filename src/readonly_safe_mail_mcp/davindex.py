@@ -4,9 +4,10 @@ Beside the mail index, never inside it, so that adding contacts and calendars ne
 renames nor rebuilds the mail index. Only field-policy output and validated event timing
 (caltime.py) are written here.
 
-Named `dav-<fingerprint>.sqlite` by its own policy: this schema, FIELD_POLICY_VERSION and,
-for every account with a DAV source on, its username, DAV hosts, rules and which sources
-are on (with the calendars' allow/deny lists). A change to any of them selects a new, empty
+Named `dav-<fingerprint>.sqlite` by its own policy: this schema, FIELD_POLICY_VERSION,
+caltime.TIMING_VERSION when a calendar is on and, for every account with a DAV source on,
+its username, DAV hosts, rules and which sources are on (with the calendars' allow/deny
+lists). A change to any of them selects a new, empty
 file, as for mail (index.py). `calendar_years` is not part of it: changing the window only
 rebuilds occurrences, which are derived data. With no source on there is no file at all.
 File modes and generations are index.py's.
@@ -171,9 +172,12 @@ def fingerprint(cfg: Config) -> str | None:
     }
     if not accounts:
         return None
-    return index.fingerprint_of(
-        {"schema": SCHEMA_VERSION, "field_policy": FIELD_POLICY_VERSION, "accounts": accounts}
-    )
+    policy = {"schema": SCHEMA_VERSION, "field_policy": FIELD_POLICY_VERSION, "accounts": accounts}
+    if dav_accounts(cfg, CALENDARS):
+        from .caltime import TIMING_VERSION  # not at the top: caltime imports this module
+
+        policy["timing"] = TIMING_VERSION
+    return index.fingerprint_of(policy)
 
 
 def index_path(cfg: Config) -> Path | None:
@@ -251,6 +255,11 @@ def drop_collections_except(
         )
         db.execute("DELETE FROM collections WHERE id=?", (cid,))
     return len(gone)
+
+
+def move_collection(db: sqlite3.Connection, collection: int, host: str) -> None:
+    """The same collection, now served from another host of the account's provider."""
+    db.execute("UPDATE collections SET host=? WHERE id=?", (host, collection))
 
 
 def set_ctag(db: sqlite3.Connection, collection: int, ctag: str | None) -> None:
@@ -450,6 +459,7 @@ class SourceStatus:
     incomplete: int = 0  # events whose timing is not fully understood
     pending: int = 0  # events whose occurrences are not built for the current window yet
     window: str = ""  # the days occurrences are built for, "2016-11-01 to 2036-11-30"; "" before any
+    last_attempt: float | None = None
 
 
 _COUNTS = {
@@ -488,12 +498,14 @@ def source_status(db: sqlite3.Connection | None, accounts: Iterable[str], source
             "SELECT count(*) FROM collections WHERE account=? AND source=?", (name, source)
         ).fetchone()[0]
         s = db.execute(
-            "SELECT last_success, last_error, last_error_at FROM sources WHERE account=? AND source=?",
+            "SELECT last_success, last_error, last_error_at, last_attempt FROM sources "
+            "WHERE account=? AND source=?",
             (name, source),
         ).fetchone()
+        success, error, error_at, attempt = s if s else (None, None, None, None)
         out.append(
             SourceStatus(
-                name, source, n, bad, cols, *(s if s else (None, None, None)), incomplete, pending, label
+                name, source, n, bad, cols, success, error, error_at, incomplete, pending, label, attempt
             )
         )
     return out

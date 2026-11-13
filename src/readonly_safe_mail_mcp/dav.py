@@ -62,6 +62,14 @@ class DavPolicyError(DavError):
     """Refused by this server's own read-only policy. Nothing was sent."""
 
 
+class DavTooLarge(DavError):
+    """A response over the size cap: a failure, never a partial result."""
+
+
+class DavIncomplete(DavError):
+    """An answer that cannot be trusted to be the whole collection."""
+
+
 # --- hosts -------------------------------------------------------------------------
 
 
@@ -77,12 +85,17 @@ class DavHosts:
     partitions: bool = False
 
     def allows(self, host: object) -> bool:
+        return self.base(host) is not None
+
+    def base(self, host: object) -> str | None:
+        """The contacts or calendars host that `host` is, or is a partition host of; None
+        when `host` is not allowed. Two hosts with the same base serve the same account."""
         if not isinstance(host, str):
-            return False
+            return None
         for base in (self.contacts, self.calendars):
             if host == base or (self.partitions and re.fullmatch(r"p\d{1,3}-" + re.escape(base), host)):
-                return True
-        return False
+                return base
+        return None
 
     def start(self, service: Service) -> DavLocation:
         if service == "contacts":
@@ -129,10 +142,12 @@ def check_path(path: object) -> str:
 
 def resolve(ref: object, base_host: str, hosts: DavHosts, port: int) -> DavLocation:
     """An href or Location value as a location on an allowed host, else DavPolicyError.
-    Accepts an absolute path (on `base_host`) or an https URL; nothing relative."""
+    Accepts an absolute path (on `base_host`) or an https URL; nothing relative. "&" and
+    "'" are legal in a path but refused by check_path (so no path needs XML escaping); they
+    are percent-encoded here, which a server decodes to the same path."""
     if not isinstance(ref, str):
         raise DavPolicyError("href refused by read-only guard")
-    ref = ref.strip()
+    ref = ref.strip().replace("&", "%26").replace("'", "%27")
     if ref.startswith("/"):
         return DavLocation(base_host, check_path(ref))
     m = _URL_RE.fullmatch(ref)
@@ -416,16 +431,19 @@ _STATUS_RE = re.compile(r"HTTP/\d(?:\.\d)? (\d{3})(?: .*)?", re.S)
 @dataclass(frozen=True)
 class DavItem:
     """One <response> entry as plain values. `status` is the entry's own status, else
-    200 when any propstat was 200, else the first propstat's. Properties are read only
-    from propstats with status 200."""
+    200 when any propstat was 200, else the first propstat's; `entry_status` is the
+    entry's own status, None when it has propstats. Properties are read only from
+    propstats with status 200: `resource_types` is None when the resourcetype property
+    did not come back in one."""
 
     host: str
     href: str
     status: int
+    entry_status: int | None = None
     etag: str | None = None
     ctag: str | None = None
     displayname: str | None = None
-    resource_types: tuple[str, ...] = ()
+    resource_types: tuple[str, ...] | None = None
     components: tuple[str, ...] = ()
     data: str | None = None
     principal: DavLocation | None = None
@@ -499,7 +517,7 @@ def parse_multistatus(data: bytes, base: DavLocation, hosts: DavHosts, port: int
         status_el = resp.find(_D + "status")
         if status_el is not None:
             status = _status(status_el.text)
-            items += [DavItem(loc.host, loc.path, status) for loc in locs]
+            items += [DavItem(loc.host, loc.path, status, status) for loc in locs]
             continue
         propstats = resp.findall(_D + "propstat")
         if len(locs) != 1 or not propstats:
@@ -522,20 +540,24 @@ def parse_multistatus(data: bytes, base: DavLocation, hosts: DavHosts, port: int
 def _read_capped(resp: http.client.HTTPResponse, cap: int, deadline: float) -> bytes:
     declared = resp.length
     if declared is not None and declared > cap:
-        raise DavError("DAV response over the size cap")
+        raise DavTooLarge("DAV response over the size cap")
     chunks, total = [], 0
     while True:
         if time.monotonic() > deadline:
             raise DavError("DAV response took too long")
-        chunk = resp.read(65536)
+        # read1, not read: read(n) blocks until n bytes or the end, so a server sending a
+        # byte at a time would never reach the deadline check. Each read1 waits at most
+        # the socket timeout.
+        chunk = resp.read1(65536)
         if not chunk:
-            # read(amt) returns b"" at an early end of stream instead of raising IncompleteRead.
+            # read1 returns b"" at an early end of stream instead of raising IncompleteRead.
             if declared is not None and total != declared:
                 raise DavError("DAV response truncated")
+            resp.read()  # b"": marks the response done (Python 3.11's read1 does not at its length)
             return b"".join(chunks)
         total += len(chunk)
         if total > cap:
-            raise DavError("DAV response over the size cap")
+            raise DavTooLarge("DAV response over the size cap")
         chunks.append(chunk)
 
 
@@ -653,7 +675,12 @@ class DavSource:
         return items[0]
 
     def _children(self, loc: DavLocation, body: bytes) -> list[DavItem]:
+        """The members of a collection. The collection's own entry is left out, but an
+        error status on it (507 there marks a truncated answer, as in RFC 6578)
+        means the members listed are not all of them."""
         final, items = self._multistatus("PROPFIND", loc, body)
+        if any(i.entry_status not in (None, 200) for i in items if same_path(i.href, final.path)):
+            raise DavIncomplete("DAV listing incomplete (the server marked it so)")
         return [i for i in items if not same_path(i.href, final.path)]
 
     # -- discovery and listings --

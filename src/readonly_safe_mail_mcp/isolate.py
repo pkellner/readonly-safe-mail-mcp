@@ -8,7 +8,9 @@ installed packages, no file writes, CPU/time/output limits, and one request on s
   macOS:  sandbox-exec with a deny-by-default profile
   Linux:  bubblewrap (bwrap) with every namespace unshared
   other:  attachments refused, unless config `attachments: ask-unsandboxed`; the
-          expansion worker runs as a plain child with the same limits
+          expansion worker runs as a plain child: an empty environment, the wall-clock
+          kill and the output cap, and on POSIX the CPU and file-size limits; Windows has
+          no CPU or file-size limit
 A timeout alone is never called a sandbox.
 """
 
@@ -26,6 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import paths
+
+if os.name == "posix":
+    import resource  # here, not in the forked child: an import there can deadlock on the import lock
 
 TIMEOUT = 60
 CPU_SECONDS = 40
@@ -139,10 +144,8 @@ def find_runner(mode: str, worker_module: str = EXTRACT) -> Runner:
     )
 
 
-def _limits(cpu_seconds: int) -> None:  # runs in the child before exec
+def _limits(cpu_seconds: int) -> None:  # runs in the child between fork and exec: keep it minimal
     try:
-        import resource
-
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
         resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
     except Exception:
