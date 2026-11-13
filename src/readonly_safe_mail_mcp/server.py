@@ -41,9 +41,9 @@ NO_CALENDARS = "Calendars are not turned on for any account (accounts.yaml: cale
 NO_CALENDARS_INDEX = (
     "Calendars have not been synced yet. A background sync has been started; try again in a minute."
 )
-_SOURCE_TEXT = {  # source -> (off, not synced yet, untrusted-content line, word for a running sync)
-    davindex.CONTACTS: (NO_CONTACTS, NO_CONTACTS_INDEX, q.UNTRUSTED_CONTACTS, "contacts"),
-    davindex.CALENDARS: (NO_CALENDARS, NO_CALENDARS_INDEX, q.UNTRUSTED_EVENTS, "calendar"),
+_SOURCE_TEXT = {  # source -> (off, not synced yet, untrusted-content line)
+    davindex.CONTACTS: (NO_CONTACTS, NO_CONTACTS_INDEX, q.UNTRUSTED_CONTACTS),
+    davindex.CALENDARS: (NO_CALENDARS, NO_CALENDARS_INDEX, q.UNTRUSTED_EVENTS),
 }
 
 
@@ -153,9 +153,9 @@ def build_server() -> MCPServer:
         lines += q.source_status_lines(statuses, calendar_years=cfg.calendar_years)
         if runner.running:
             lines.append("A sync is running now.")
-        words = [w for s, (*_, w) in _SOURCE_TEXT.items() if davindex.dav_accounts(cfg, s)]
+        words = davindex.source_words(cfg)
         if dav_runner.running and words:
-            lines.append(f"A {' and '.join(words)} sync is running now.")
+            lines.append(f"A {words} sync is running now.")
         return "\n".join(lines)
 
     @mcp.tool(annotations=READ_ONLY, structured_output=False)
@@ -320,7 +320,7 @@ def build_server() -> MCPServer:
         return q.UNTRUSTED + "\n" + (sep.join(out) if out else "No matching passages.")
 
     def _dav(source: str, fn) -> str:
-        off, not_synced, untrusted, _ = _SOURCE_TEXT[source]
+        off, not_synced, untrusted = _SOURCE_TEXT[source]
         cfg = _config()
         fp = davindex.fingerprint(cfg)
         if fp is None or not davindex.dav_accounts(cfg, source):

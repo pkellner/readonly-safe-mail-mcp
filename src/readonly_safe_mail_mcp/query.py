@@ -131,6 +131,8 @@ def source_status_lines(
     for s in statuses:
         if s.last_success is None and not s.collections:
             state = "not synced yet"
+            if s.source == CALENDARS and calendar_years is not None:
+                state += f" (calendar_years: {calendar_years})"
         elif s.source == CALENDARS:
             state = _calendar_state(s, calendar_years)
         else:

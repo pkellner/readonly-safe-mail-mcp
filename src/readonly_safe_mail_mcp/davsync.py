@@ -154,13 +154,18 @@ def _wanted(acct: Account, kind: _Kind, it: DavItem) -> bool:
     return acct.calendars.permits((it.displayname or "").strip())
 
 
+def wanted_collections(acct: Account, source: str, found: list[DavItem]) -> list[DavItem]:
+    """The address books or calendars of `found` that this account's sync would use."""
+    return [it for it in found if _wanted(acct, _KINDS[source], it)]
+
+
 def _sync_source(db, src: DavSource, acct: Account, kind: _Kind, report: DavReport) -> list[str]:
     """Sync every address book, or every calendar, of one account. Returns a problem per
     collection left incomplete."""
     found = src.collections(src.home(kind.source))
     if any(it.status != 200 for it in found):
         raise Incomplete(f"{kind.collection} discovery incomplete")
-    colls = [it for it in found if _wanted(acct, kind, it)]
+    colls = wanted_collections(acct, kind.source, found)
     removed = davindex.drop_collections_except(db, acct.name, kind.source, {(c.host, c.href) for c in colls})
     if removed:
         log.info("%s: %d %s(s) no longer on the server or not wanted", acct.name, removed, kind.collection)
@@ -182,7 +187,7 @@ def _sync_source(db, src: DavSource, acct: Account, kind: _Kind, report: DavRepo
     return problems
 
 
-def _sources(acct: Account) -> list[str]:
+def sources_on(acct: Account) -> list[str]:
     on = ((davindex.CONTACTS, acct.contacts), (davindex.CALENDARS, acct.calendars is not None))
     return [source for source, is_on in on if is_on]
 
@@ -195,7 +200,7 @@ def sync_account(
     password_fn: Callable[[str], str] = credentials.get_password,
 ) -> list[DavReport]:
     """Fetch every DAV source of one account that is on: one report per source."""
-    reports = [DavReport(acct.name, source) for source in _sources(acct)]
+    reports = [DavReport(acct.name, source) for source in sources_on(acct)]
     db = davindex.connect(cfg, create=True)
     assert db is not None
     done: list[DavReport] = []
