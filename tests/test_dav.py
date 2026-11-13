@@ -98,11 +98,12 @@ def ok_principal(href="/123456789/principal/"):
     return Reply(207, multistatus(entry("/", fakedav.principal(href))))
 
 
-def wire(method: str, path: str, host: str, body: bytes, depth: str) -> bytes:
+def wire(method: str, path: str, host: str, body: bytes, depth: str | None) -> bytes:
     return (
         f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {dav.USER_AGENT}\r\n"
-        f"Accept-Encoding: identity\r\nAuthorization: {AUTH}\r\nDepth: {depth}\r\n"
-        f"Content-Type: application/xml; charset=utf-8\r\nContent-Length: {len(body)}\r\n\r\n"
+        f"Accept-Encoding: identity\r\nAuthorization: {AUTH}\r\n"
+        + (f"Depth: {depth}\r\n" if depth else "")
+        + f"Content-Type: application/xml; charset=utf-8\r\nContent-Length: {len(body)}\r\n\r\n"
     ).encode() + body
 
 
@@ -146,6 +147,32 @@ def test_method_refused_through_raw_send(server, ctx, method):
         with pytest.raises(DavPolicyError):
             conn.send(data)
     assert_nothing_sent(server)
+
+
+@pytest.mark.parametrize("method", WRITE_METHODS)
+def test_write_on_an_open_connection_refused(server, ctx, method):
+    server.on("PROPFIND", "/", ok_principal())
+    conn = connect(server, ctx)
+    conn.request("PROPFIND", "/", BODY_PRINCIPAL)
+    conn.getresponse().read()
+    assert conn.sock is not None
+    with pytest.raises(DavPolicyError):
+        conn.send(f"{method} / HTTP/1.1\r\nHost: {CONTACTS}\r\nContent-Length: 0\r\n\r\n".encode())
+    conn = connect(server, ctx)
+    conn.request("PROPFIND", "/", BODY_PRINCIPAL)
+    conn.getresponse().read()
+    with pytest.raises(DavPolicyError):
+        conn.putrequest(method, "/")
+    with pytest.raises(DavPolicyError):
+        conn.request(method, "/", BODY_PRINCIPAL)
+    assert [(r.method, r.path) for r in server.requests] == [("PROPFIND", "/")] * 2
+    assert server.received == wire("PROPFIND", "/", f"{CONTACTS}:{server.port}", BODY_PRINCIPAL, "0") * 2
+
+
+@pytest.mark.parametrize("method", WRITE_METHODS + OTHER_METHODS + SPELLINGS)
+def test_method_check_comes_first(method):
+    with pytest.raises(DavPolicyError, match="method"):
+        check_request(method, "/", BODY_PRINCIPAL)
 
 
 def test_exact_validated_request_refused_through_raw_send(server, ctx):
@@ -317,21 +344,21 @@ def test_unknown_request_body_refused(server, ctx, method, body):
 
 
 @pytest.mark.parametrize(
-    "method,path,body",
+    "method,path,body,depth",
     [
-        ("PROPFIND", "/", BODY_PRINCIPAL),
-        ("PROPFIND", "/1/principal/", BODY_ADDRESSBOOK_HOME),
-        ("PROPFIND", "/1/principal/", BODY_CALENDAR_HOME),
-        ("PROPFIND", "/1/carddavhome/", BODY_COLLECTIONS),
-        ("PROPFIND", "/1/carddavhome/card/", BODY_ETAGS),
-        ("REPORT", "/ab/", _mg("/ab/1.vcf", "/ab/2.vcf")),
-        ("REPORT", "/ab/", _mg(*[f"/ab/{i}.vcf" for i in range(dav.MAX_MULTIGET_HREFS)])),
-        ("REPORT", "/ab%40x/", _mg("/ab@x/1.vcf")),
-        ("REPORT", "/cal/", _mg("/cal/e.ics", head=CAL_HEAD, tail=CAL_TAIL)),
+        ("PROPFIND", "/", BODY_PRINCIPAL, "0"),
+        ("PROPFIND", "/1/principal/", BODY_ADDRESSBOOK_HOME, "0"),
+        ("PROPFIND", "/1/principal/", BODY_CALENDAR_HOME, "0"),
+        ("PROPFIND", "/1/carddavhome/", BODY_COLLECTIONS, "1"),
+        ("PROPFIND", "/1/carddavhome/card/", BODY_ETAGS, "1"),
+        ("REPORT", "/ab/", _mg("/ab/1.vcf", "/ab/2.vcf"), None),
+        ("REPORT", "/ab/", _mg(*[f"/ab/{i}.vcf" for i in range(dav.MAX_MULTIGET_HREFS)]), None),
+        ("REPORT", "/ab%40x/", _mg("/ab@x/1.vcf"), None),
+        ("REPORT", "/cal/", _mg("/cal/e.ics", head=CAL_HEAD, tail=CAL_TAIL), None),
     ],
 )
-def test_every_body_this_package_builds_is_accepted(method, path, body):
-    assert check_request(method, path, body) in ("0", "1")
+def test_every_body_this_package_builds_is_accepted(method, path, body, depth):
+    assert check_request(method, path, body) == depth
 
 
 @pytest.mark.parametrize("headers", [{"Depth": "0"}, {"Authorization": AUTH}, {"X": "1"}, [("Depth", "0")]])
@@ -505,8 +532,19 @@ def test_connection_retargeted_after_construction_refused(server, ctx, attr, val
 
 
 class _Subclass(GuardedDAVConnection):
+    """Passes the constructor's checks, then undoes every guarded primitive."""
+
+    _base = http.client.HTTPSConnection
+    putrequest, putheader, endheaders, send, connect = (
+        _base.putrequest,
+        _base.putheader,
+        _base.endheaders,
+        _base.send,
+        _base.connect,
+    )
+
     def request(self, method, url, body=None, headers=None, *, encode_chunked=False):
-        http.client.HTTPSConnection.request(self, method, url, body, headers or {})
+        self._base.request(self, method, url, body, headers or {})
 
 
 UNGUARDED = {
@@ -934,7 +972,7 @@ def test_multiget(server, src, service, text, make):
     ]
     assert items[0].data == text.replace("\r\n", "\n")
     body = multiget_body(service, col.path, ["/123/c/a", "/123/c/gone"])
-    assert server.received == wire("REPORT", col.path, f"{P_CONTACTS}:{server.port}", body, "1")
+    assert server.received == wire("REPORT", col.path, f"{P_CONTACTS}:{server.port}", body, None)
 
 
 def test_whole_flow_reuses_one_connection_per_host(server, src):

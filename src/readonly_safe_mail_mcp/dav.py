@@ -217,9 +217,10 @@ def multiget_body(service: Service, collection: str, hrefs: Sequence[str]) -> by
     return head + b"".join(b"<d:href>" + h.encode("ascii") + b"</d:href>" for h in hrefs) + tail
 
 
-def check_request(method: object, path: object, body: object) -> str:
+def check_request(method: object, path: object, body: object) -> str | None:
     """The Depth header for (method, path, body) if this module built that request, else
-    DavPolicyError. Error messages never include the request."""
+    DavPolicyError. None for a multiget: RFC 6352 section 8.7 and RFC 4791 section 7.9 say
+    the client should not send Depth there. Error messages never include the request."""
     if method not in ALLOWED_METHODS:
         raise DavPolicyError("DAV method refused by read-only guard")
     check_path(path)
@@ -237,8 +238,8 @@ def check_request(method: object, path: object, body: object) -> str:
                         break
                     hrefs.append(m.group(1).decode("ascii", "replace"))
                     pos = m.end()
-                if pos == len(middle) and multiget_body(service, path, hrefs) == body:  # type: ignore[arg-type]
-                    return "1"
+                if pos == len(middle) and multiget_body(service, path, hrefs) == body:
+                    return None
     raise DavPolicyError("DAV request body refused by read-only guard")
 
 
@@ -322,7 +323,7 @@ class GuardedDAVConnection(http.client.HTTPSConnection):
             ("User-Agent", USER_AGENT),
             ("Accept-Encoding", "identity"),
             ("Authorization", self._authorization),
-            ("Depth", depth),
+            *([("Depth", depth)] if depth is not None else []),
             ("Content-Type", "application/xml; charset=utf-8"),
             ("Content-Length", str(len(body))),
         ]
