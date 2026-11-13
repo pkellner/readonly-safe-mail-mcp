@@ -8,10 +8,12 @@
 #   - the saved password(s) in your login Keychain
 #   - the settings folder  ~/.config/readonly-safe-mail-mcp
 #   - the downloaded mail  ~/Library/Application Support/readonly-safe-mail-mcp
+#     (the same folder holds the contacts and calendar index and its lock, if you turned
+#     them on; they go with it)
 #   - Claude Desktop's log file for this server
 #   - the tool itself (uv tool uninstall) and its cached download
 #   - uv, only if you agree (asked separately; it is never removed if other tools use it)
-# Your mail on iCloud is not touched. Safe to run again; it skips what is already gone.
+# Your mail, contacts and calendar on iCloud are not touched. Safe to run again; it skips what is already gone.
 set -uo pipefail
 
 NAME="readonly-safe-mail-mcp"
@@ -122,11 +124,14 @@ PYEOF
 # ---------------------------------------------------------------- what is here?
 mentions() { [ -f "$1" ] && grep -q -e "$NAME" -e "\"$SERVER\"" "$1" 2>/dev/null; }
 has_keychain() { security find-generic-password -s "$NAME" >/dev/null 2>&1; }
+# What the data folder holds: the contacts and calendar index (dav-*.sqlite) only if they were on.
+data_what="mail"
+compgen -G "$DATA_DIR/dav-*.sqlite*" >/dev/null && data_what="mail, contacts and calendar"
 has_tool=""; { [ -d "$TOOL_DIR" ] || [ -e "$BIN" ] || [ -L "$BIN" ]; } && has_tool=1
 found=()
 [ -n "$has_tool" ] && found+=("The tool: $TOOL_DIR")
 [ -d "$CONFIG_DIR" ] && found+=("Settings: $CONFIG_DIR")
-[ -d "$DATA_DIR" ] && found+=("Downloaded mail ($(du -sh "$DATA_DIR" 2>/dev/null | cut -f1 | tr -d ' ')): $DATA_DIR")
+[ -d "$DATA_DIR" ] && found+=("Downloaded $data_what ($(du -sh "$DATA_DIR" 2>/dev/null | cut -f1 | tr -d ' ')): $DATA_DIR")
 { has_keychain || [ -d "$CONFIG_DIR/credentials" ]; } && found+=("Saved password in your Keychain")
 HAS_CLAUDE=""; command -v claude >/dev/null 2>&1 && HAS_CLAUDE=1
 in_claude_code() { [ -n "$HAS_CLAUDE" ] && (cd "$HOME" && claude mcp get "$SERVER" >/dev/null 2>&1); }
@@ -147,7 +152,7 @@ echo
 echo "This will permanently remove from this Mac:"
 for f in "${found[@]}"; do note "$f"; done
 echo
-echo "Your mail on iCloud is not touched; only the local copy is deleted."
+echo "Your $data_what on iCloud is not touched; only the local copy is deleted."
 if ! yesno "Remove all of this?" n; then
   printf '\nCancelled. Nothing was removed.\n'; exit 0
 fi
@@ -241,7 +246,7 @@ fi
 # ---------------------------------------------------------------- 4. files
 say "Removing settings, downloaded mail and logs"
 uv_marked=""; [ -f "$UV_MARKER" ] && uv_marked=1
-for pair in "settings|$CONFIG_DIR" "downloaded mail|$DATA_DIR" "Claude Desktop log|$DESKTOP_LOG"; do
+for pair in "settings|$CONFIG_DIR" "downloaded $data_what|$DATA_DIR" "Claude Desktop log|$DESKTOP_LOG"; do
   label="${pair%%|*}"; path="${pair#*|}"
   if [ -e "$path" ]; then
     if rm -rf "$path"; then ok "Removed the $label ($path)"

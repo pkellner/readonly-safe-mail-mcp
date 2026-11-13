@@ -78,3 +78,25 @@ def test_no_personal_config_tracked():
         if p.name == "accounts.yaml" or p.name.endswith(".local.yaml") or p.suffix in (".sqlite", ".env")
     ]
     assert not bad, f"personal config or data tracked: {bad}"
+
+
+def test_version_is_the_same_in_every_place():
+    """The release is the tarball of tag v<version>: the package, the installer and the docs
+    must all name the same one."""
+    from readonly_safe_mail_mcp import __version__
+
+    def one(path: str, pattern: str) -> str:
+        found = re.findall(pattern, (ROOT / path).read_text(encoding="utf-8"), re.M)
+        assert len(found) >= 1, f"{path}: no version found"
+        assert len(set(found)) == 1, f"{path}: several versions {found}"
+        return found[0]
+
+    seen = {
+        "pyproject.toml": one("pyproject.toml", r'^version = "([^"]+)"'),
+        "install.sh": one("install.sh", r'^VERSION="([^"]+)"'),
+        "README.md": one("README.md", r"/refs/tags/v([0-9][^/]*)\.tar\.gz"),
+        "docs/THREAT_MODEL.md": one("docs/THREAT_MODEL.md", r"@v([0-9][0-9.]*)"),
+        "docs/PLAN.md": one("docs/PLAN.md", r"@v([0-9][0-9.]*)"),
+    }
+    assert seen == dict.fromkeys(seen, __version__)
+    assert __version__ == "0.3.0"

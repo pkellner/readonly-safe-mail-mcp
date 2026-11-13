@@ -1,6 +1,6 @@
 # readonly-safe-mail-mcp — Design Plan (for review)
 
-Status: **built through step 6 (0.2.0); see §13.** Reviewers: please challenge anything below, especially §3 (threat model) and §11 (questions for reviewers).
+Status: **built through step 6 (0.2.0), plus contacts and calendars (0.3.0, §14); see §13.** Reviewers: please challenge anything below, especially §3 (threat model) and §11 (questions for reviewers).
 
 ## 1. Goal
 
@@ -19,6 +19,7 @@ Example target prompt: *"Find all the emails from {person} where she talks about
 - OAuth providers (Microsoft 365 / Outlook.com no longer accept IMAP app passwords). Deferred to v2.
 - Semantic / embedding search. Keyword search plus sender/date filters, with the AI choosing search terms, covers the target prompts. Revisit only if real usage shows gaps.
 - Any network-listening transport. stdio only.
+- Google contacts and calendar (OAuth). Writing to contacts or calendars, ever.
 
 ## 2. Origin
 
@@ -141,6 +142,7 @@ accounts:
 folders: { allow: ["*"], deny: [Junk, Trash, "Deleted Messages", Drafts] }
 sync_if_older_than: 5m
 attachments: ask        # ask | never
+# optional, per account: contacts: true, calendars: true (or { allow, deny }); top level: calendar_years: 10 (§14)
 ```
 
 - Presets: iCloud, Gmail (app password + 2FA), Fastmail, Yahoo.
@@ -158,6 +160,8 @@ attachments: ask        # ask | never
 | `read_message` | Full sanitized body of one message | quoted replies removed, capped |
 | `get_thread` | Conversation around a message | de-duplicated, quotes removed |
 | `request_attachments` | Ask human to approve opening 1+ attachments | see §7 |
+
+Four more tools, `search_contacts`, `read_contact`, `search_events` and `read_event`, are registered only while an account has that source on (§14).
 
 All tools: MCP `readOnlyHint=true`, `destructiveHint=false`. Results carry an "untrusted third-party content" marker.
 
@@ -197,14 +201,14 @@ All parsing and decoding happens inside the §7.2 worker.
 README opens with install. Example (GitHub-pinned; PyPI form shown once published):
 
 ```sh
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.2 readonly-safe-mail-mcp set-password icloud
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.2 readonly-safe-mail-mcp check
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.2 readonly-safe-mail-mcp sync
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.0 readonly-safe-mail-mcp set-password icloud
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.0 readonly-safe-mail-mcp check
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.0 readonly-safe-mail-mcp sync
 ```
 
 Copy-paste configs for: Claude Desktop (`claude_desktop_config.json`, `mcpServers`), Claude Code (`claude mcp add`), Cursor (`~/.cursor/mcp.json`), VS Code (`.vscode/mcp.json`, `servers`), generic stdio.
 
-CLI subcommands: `set-password`, `delete-password`, `check` (test login, show one sanitized sample, project index size), `sync`, `print-rules` (effective merged rules).
+CLI subcommands: `set-password`, `delete-password`, `check` (test login, show one sanitized sample, project index size; a read-only login per contacts or calendar source that is on), `sync` (mail, then contacts and calendar), `status`, `print-rules` (effective merged rules).
 
 ## 9. Repo, CI, and review hygiene
 
@@ -256,3 +260,16 @@ CLI subcommands: `set-password`, `delete-password`, `check` (test login, show on
 6. ✅ README (install first), THREAT_MODEL.md, SECURITY.md, CONTRIBUTING.md, filter-bypass issue template; CI (SHA-pinned, 3 OS × 3 Python), CodeQL, Dependabot, personal-data guard; `file` credential backend and permission warnings in `check` (§3.1). CI first runs on push.
 7. ◐ Owner runs `check` + first sync on real accounts (iCloud done 2026-11-06; dedicated-user setup steps not yet tested).
 8. Repo goes public; branch protection on `main`; PyPI per open decision.
+9. ✅ Contacts and calendars (§14, 0.3.0), built against a simulated server; a live read-only check against iCloud is not done yet.
+
+## 14. Contacts and calendars (0.3.0)
+
+The assistant can also search the user's contacts and calendars over CardDAV and CalDAV, read-only, with the password already stored for mail. Both are off until an account sets `contacts: true` or `calendars: true` (iCloud, Fastmail, Yahoo; Gmail is a config error). With both off, the tool list, `instructions`, `list_accounts`, `status` and the mail index file are unchanged (`tests/test_mail_untouched.py`).
+
+- **Promise (structural, like promise 1 in §1):** no operation writes to contacts or calendars. The only HTTP client is `GuardedDAVConnection` (`dav.py`), which refuses anything but `PROPFIND` and `REPORT`, a foreign host, a body this package did not build, or a header outside the fixed set, inside the connection object, before a byte is sent. The password allows writes at the provider, so this guard is the only barrier (THREAT_MODEL.md).
+- **Parser and field policy.** `vcal.py` parses vCard and iCalendar into raw values (shared with the attachment renderer, which imports its line helpers). `fieldpolicy.py` decodes, normalizes, classifies, redacts and caps every field, with its own version (`FIELD_POLICY_VERSION`); the mail `SANITIZER_VERSION` is untouched. Phones and postal addresses are shown in validated shapes (the exception to §3's over-redaction); notes and descriptions get the full mail redaction; websites, photos, messaging handles, alarms, attachments and conference links are dropped.
+- **Second index.** `dav-<fingerprint>.sqlite` beside the mail index (`davindex.py`), same modes and generations, its own schema version. Collections, cards, events with validated timing and an incomplete reason, occurrences, per-source status and the window indexed. Phones are also stored digits-only.
+- **Sync (`davsync.py`).** After the mail sync has released its lock, under its own lock, on its own thread when started by a tool: a DAV failure never reaches the mail sync. Collections are discovered; rows are deleted, and the ctag stored, only after a complete, validated listing and every changed item processed. Anything less deletes nothing and the next sync retries.
+- **Calendar (`caltime.py`, `expand.py`).** Times with `Z` or an IANA `TZID` are exact; all-day values are dates; floating time is read in the machine's zone and labelled; a `TZID` that is not an IANA name is read as floating and marked incomplete (this covers Outlook's Windows names). `RRULE` with FREQ daily or coarser is expanded in a worker child process on the runner of §7.2 (sandboxed where it can sandbox, a plain child with the same limits elsewhere, no CPU limit on Windows), in batches with deadlines and a 60 s budget per sync; the rest is pending until the next sync. What cannot be understood is kept, marked incomplete, and named in every date search it could touch, so a search never looks empty by mistake.
+- **Window.** `calendar_years` (top level, 1 to 50, default 10): years before and after the current month. Occurrences are rebuilt locally, with no request, when the window, the option or the expander version changes. The option is shown in the installer's `accounts.yaml` line and question, in `status` and `list_accounts` beside the range indexed, in the reply to a search outside the range, and in the README.
+- **Not done:** Google; reading the Mac's own Contacts and Calendar stores; to-dos, journals and photos; embedded `VTIMEZONE` definitions and sub-daily rules (marked incomplete); a live check against iCloud.

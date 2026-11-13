@@ -1,7 +1,7 @@
 [project]
 name = "readonly-safe-mail-mcp"
-version = "0.2.2"
-description = "Read-only, redacting, multi-account IMAP mail MCP server with a local sanitized search index"
+version = "0.3.0"
+description = "Read-only, redacting, multi-account mail, contacts and calendar MCP server with local sanitized search indexes"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

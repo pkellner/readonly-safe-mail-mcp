@@ -1498,7 +1498,7 @@ def test_list_accounts_and_status_report_calendars(env, capsys):
     mcp = server.build_server()
     assert call(mcp, "list_accounts") == (
         "icloud: 0 messages indexed, not synced yet; last sync never\n"
-        "icloud calendars: not synced yet; last sync never"
+        "icloud calendars: not synced yet (calendar_years: 10); last sync never"
     )
     fill(
         cfg,

@@ -152,6 +152,12 @@ def dav_accounts(cfg: Config, source: str | None = None) -> list[Account]:
     ]
 
 
+def source_words(cfg: Config) -> str:
+    """The sources some account has on, in words: 'contacts', 'calendar' or 'contacts and calendar'."""
+    words = [w for s, w in ((CONTACTS, "contacts"), (CALENDARS, "calendar")) if dav_accounts(cfg, s)]
+    return " and ".join(words)
+
+
 def fingerprint(cfg: Config) -> str | None:
     accounts = {
         a.name: {

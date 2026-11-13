@@ -1048,4 +1048,6 @@ def test_cli_sync_runs_contacts_after_mail(env, monkeypatch, capsys):
 
     monkeypatch.setattr(davsync, "sync_all", busy)
     assert cli.main(["sync"]) == 1
-    assert "Another contacts sync" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    # this config has contacts only; calendar-only and both are in test_cli_dav.py
+    assert "Another contacts sync is already running (CLI or MCP server). Try again later.\n" in err

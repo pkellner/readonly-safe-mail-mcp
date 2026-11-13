@@ -15,6 +15,7 @@ several independent points:
 | Step in the attack | Control |
 |---|---|
 | The AI sends or changes mail | There is no SMTP code. The IMAP layer has narrow methods that build their own commands. A second layer inside the connection object (`check_command`) refuses any command not on an exact allowlist before a byte is sent, including imaplib's own `store`, `copy`, and `expunge`. Folders are opened with EXAMINE (read-only), never SELECT. |
+| The AI writes to contacts or calendars (only if you turn them on) | No write code exists. The only HTTP client is `GuardedDAVConnection` in `dav.py`: only `PROPFIND` and `REPORT`, only the provider's hosts, only request bodies this package builds, checked inside the connection before a byte is sent. See [Contacts and calendars](#contacts-and-calendars). |
 | The AI sees a reset link | Every URL is removed from every body, not just suspicious ones. That includes bare domains with paths, IP URLs, and percent-encoded URLs. HTML is converted to text and all attributes (`href`, `src`) are dropped. |
 | The AI sees a code or token | Digit runs, mixed letter/digit tokens (either case), and long high-entropy strings are masked. |
 | The AI sees a security email | The body is withheld (headers only) when the sender's domain is on the blocklist or a sensitive keyword appears anywhere in any alternative of the body. |
@@ -53,20 +54,84 @@ several independent points:
 - **After extraction**, the text goes through the same classifier and redaction as
   email bodies. Attachments of withheld messages are never opened.
 
+## Contacts and calendars
+
+Off until an account sets `contacts: true` or `calendars: true`; a mail-only setup is
+unchanged. The app-specific password also permits writes at the provider (CardDAV and
+CalDAV), so what follows is about keeping this server from using that.
+
+- **The DAV guard is the only barrier against a write.** The provider will accept a write
+  from this password, so nothing outside this package stops one. `GuardedDAVConnection`
+  (`dav.py`) is a subclass of `http.client.HTTPSConnection` that checks every request in
+  `request`, `putrequest`, `putheader`, `endheaders` and `send`, before a byte reaches the
+  socket: the method must be `PROPFIND` or `REPORT` (read-only by RFC 4918 and RFC 3253),
+  the host an allowed one (the preset's contacts and calendar hosts and their `pNN-` partition
+  hosts), the path plain, the body one of the fixed bodies this package builds, and the
+  headers the fixed set. The DAV source refuses any connection that is not exactly that
+  class. Redirects are followed by hand, only to allowed hosts, and `Authorization` goes to
+  no other host. Responses have a size and time cap; one that hits it is a failure, never a
+  partial result. XML goes through `defusedxml`; TLS through the OS trust store, as for mail.
+  Tests assert that each of ten refused methods, sent through the source, `request`,
+  `putrequest` and raw `send`, leaves the fake server's record empty. A bug here is a
+  write to your contacts or calendar, and the tests are the only check; read this file.
+- **Calendar content is writable by strangers.** Anyone can send an invitation, and a
+  calendar service often puts it in your calendar unasked. Titles, locations, descriptions, organizer and
+  attendee names, and repeat rules are all hostile input, and prompt injection can arrive
+  that way as it does in mail. Every field is decoded and normalized first, then classified
+  and redacted by the field policy (`fieldpolicy.py`, its own version, separate from the mail
+  sanitizer): free text gets the full mail redaction and keyword withholding, an organizer in
+  a blocked sender domain withholds the description, and a field that cannot be decoded is
+  withheld, never returned raw. Times and repeat rules are parsed into validated values and
+  rendered by this code; raw text is never stored or shown. Results carry an
+  untrusted-content line of their own.
+- **Phone numbers and addresses are shown (an exception to redaction).** Mail masks digit
+  runs, so phone numbers and postal codes would be `[code hidden]`; a contact card without
+  them is useless, so they are kept, but only in validated shapes: a phone must be ASCII and
+  have 7 to 15 digits, a postal code a short pattern; anything else is dropped. They go to
+  your AI provider with everything else the assistant reads. Free-text notes and event text
+  still get the mail redaction, and runs of 11 or more digits are masked in every text field.
+- **The expansion worker has limits, and they differ by platform.** Repeat rules are
+  expanded in a child process that receives validated values only, never iCalendar text,
+  with an empty environment, no credentials, a wall-clock kill, and bounds in the code (a
+  start of 1900 or later, daily or coarser, `UNTIL` clamped to the window, at most 100,000
+  steps). It runs through the same runner as the attachment worker. Where that runner can
+  sandbox (macOS `sandbox-exec`, Linux `bwrap`), it has no network, no file writes and no
+  access to your files, config or index. On macOS and Linux it also has a CPU limit.
+  Elsewhere it is a plain child process, which is **not a sandbox**, with the same limits;
+  on Windows there is no CPU limit, only the wall-clock kill. A killed or stuck worker marks the event incomplete; a
+  sync spends at most 60 seconds on expansion, and the contacts and calendar sync takes its
+  own lock after the mail sync has finished, so a stuck expansion never delays mail.
+- **Incomplete events are named, not hidden.** An event whose timing the server cannot fully
+  place is kept, indexed at its first occurrence and named in every date search it could
+  touch, so a gap never reads as a free day. Windows time-zone names (common in Outlook
+  invitations) are read as floating time and marked incomplete.
+- **Second index file.** `dav-*.sqlite`, beside the mail index, is named by its own
+  fingerprint (field policy version, hosts, rules, which sources are on) and has the same
+  owner-only modes and generations; a policy change selects a new, empty file. A DAV
+  failure is recorded and never fails the mail sync.
+- **Not checked against a live account yet.** The DAV guard and sync are tested against a
+  simulated server built from the protocol specifications. Fastmail and Yahoo hosts are built
+  in but unchecked.
+- Google contacts and calendar are not supported (OAuth, a non-goal).
+
 ## Residual risks (documented, not solved)
 
 - **Privacy from your AI provider.** Whatever the assistant reads is sent to it. The
-  filters remove credentials, not personal information.
+  filters remove credentials, not personal information. With contacts on, that includes
+  names, phone numbers and addresses of people who never agreed to it.
 - **The filters are heuristic.** Homoglyphs, codes spelled out as words ("four eight
   two…"), or a code split across lines can get through. Please report bypasses (see
   SECURITY.md).
-- **Over-redaction is deliberate.** Phone numbers, ZIP codes, order numbers, and
+- **Over-redaction is deliberate.** In mail, phone numbers, ZIP codes, order numbers, and
   account numbers are often masked as `[code hidden]`. Amounts with a currency sign,
-  years, and ISO dates are kept.
+  years, and ISO dates are kept. Contact cards and events are the exception: validated
+  phone numbers and postal addresses are shown (see [Contacts and
+  calendars](#contacts-and-calendars)).
 - **Images are not redacted.** A code, QR code, or screenshot of a login page in an
   approved image reaches the assistant. The dialog warns when images are included.
-- **The index is a second copy of your mail.** It is sanitized but still personal, so
-  keep it on an encrypted disk (FileVault, BitLocker, LUKS).
+- **The index is a second copy of your mail** (and of your contacts and calendar, if on).
+  It is sanitized but still personal, so keep it on an encrypted disk (FileVault,
+  BitLocker, LUKS).
 - **Desktop-automation tools.** An assistant that can also click on your screen
   (computer use, browser automation) could approve its own dialog. Human approval only
   means something when the assistant has no such tools.
@@ -100,7 +165,7 @@ boundary.**
 #    standard account; Linux: sudo useradd -m mailmcp).
 # 2. As that user, install and configure:
 sudo -u mailmcp -i
-uv tool install git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.2.2
+uv tool install git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.0
 mkdir -p ~/.config/readonly-safe-mail-mcp && $EDITOR ~/.config/readonly-safe-mail-mcp/accounts.yaml
 readonly-safe-mail-mcp set-password icloud --store file   # mode-600 file in that user's home
 readonly-safe-mail-mcp check && readonly-safe-mail-mcp sync
