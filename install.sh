@@ -97,6 +97,62 @@ data_words() {
   if [ -z "$cur_contacts$cur_calendars" ]; then echo "mail"; else echo "mail, $(sources_on_words)"; fi
 }
 
+# read_settings FILE prints "address|contacts|calendars" when FILE holds only what this
+# installer manages: one account "icloud" with preset icloud, a username, and optionally
+# contacts and calendars set to true or false, in the one-line or the block form, plus an
+# optional calendar_years line and this installer's own comment lines. contacts and
+# calendars print as "true", "false", or nothing when the key is absent (never asked).
+# For any other file it prints nothing, and the file is treated as edited by hand.
+# (tests/test_installer.py runs this function: keep the markers.)
+# >>> read_settings
+read_settings() {
+  awk '
+    function val(s) {
+      gsub(/^[ \t]+|[ \t]+$/, "", s)
+      if (s ~ /^".*"$/) s = substr(s, 2, length(s) - 2)
+      return s
+    }
+    function put(k, v) {
+      if (k in seen) { bad = 1; return }
+      seen[k] = 1
+      if (k == "preset") { if (v != "icloud") bad = 1; preset = v }
+      else if (k == "username") { if (v == "" || v ~ /[ "|{},:]/) bad = 1; user = v }
+      else if (k == "contacts" || k == "calendars") {
+        if (v != "true" && v != "false") bad = 1
+        flag[k] = v
+      }
+      else bad = 1
+    }
+    function pair(s,   i) {
+      i = index(s, ":")
+      if (i == 0) { bad = 1; return }
+      put(val(substr(s, 1, i - 1)), val(substr(s, i + 1)))
+    }
+    { sub(/\r$/, "") }
+    /^[ \t]*$/ { next }
+    $0 == "# Years of calendar searched before and after this month (1 to 50)." { next }
+    $0 == "# Remove the # and change the number to search further back or ahead." { next }
+    $0 == "# calendar_years: 10" { next }
+    /^calendar_years:[ ]*[0-9]+[ ]*$/ { if (years++) bad = 1; next }
+    /^accounts:[ ]*$/ { if (accounts++) bad = 1; next }
+    accounts && !account && /^  icloud:[ ]*\{[^{}]*\}[ ]*$/ {
+      account = 1
+      s = $0; sub(/^  icloud:[ ]*\{/, "", s); sub(/\}[ ]*$/, "", s)
+      n = split(s, part, ",")
+      for (j = 1; j <= n; j++) pair(part[j])
+      next
+    }
+    accounts && !account && /^  icloud:[ ]*$/ { account = 1; block = 1; next }
+    block && /^    [a-z_]+:/ { pair($0); next }
+    { bad = 1 }
+    END {
+      if (!bad && account && preset == "icloud" && user != "")
+        printf "%s|%s|%s\n", user, flag["contacts"], flag["calendars"]
+    }
+  ' "$1"
+}
+# <<< read_settings
+
 # ---------------------------------------------------------------- checks
 [ "$(uname -s)" = "Darwin" ] || fail "this installer is for macOS only." "See the README for other systems."
 { : </dev/tty; } 2>/dev/null || fail "this installer needs to be run in a Terminal window." \
@@ -116,14 +172,17 @@ if ! yesno "Continue?" n; then
 fi
 
 # ---------------------------------------------------------------- earlier setup?
-cur_email=""; custom=""; cur_contacts=""; cur_calendars=""
+cur_email=""; custom=""; cur_contacts=""; cur_calendars=""; sources_asked=""
 if [ -f "$ACCOUNTS" ]; then
-  # The line this installer writes: the address, then optionally contacts and calendars.
-  cur_email="$(sed -n 's/^  icloud: { preset: icloud, username: "\([^"]*\)"\(, contacts: true\)\{0,1\}\(, calendars: true\)\{0,1\} }$/\1/p' "$ACCOUNTS" | head -1)"
-  [ -n "$cur_email" ] || custom=1
-  if [ -n "$cur_email" ]; then
-    grep -q '^  icloud: {.*, contacts: true' "$ACCOUNTS" && cur_contacts=true
-    grep -q '^  icloud: {.*, calendars: true' "$ACCOUNTS" && cur_calendars=true
+  settings="$(read_settings "$ACCOUNTS")"
+  if [ -n "$settings" ]; then
+    IFS='|' read -r cur_email set_contacts set_calendars <<<"$settings"
+    [ "$set_contacts" != true ] || cur_contacts=true
+    [ "$set_calendars" != true ] || cur_calendars=true
+    # Both keys present: the contacts and calendar question was answered on an earlier run.
+    [ -z "$set_contacts" ] || [ -z "$set_calendars" ] || sources_asked=1
+  else
+    custom=1
   fi
 fi
 pw_saved() {
@@ -227,7 +286,7 @@ if [ "$action" = "fresh-erase" ]; then
   rm -rf "$CONFIG_DIR" && ok "Removed the settings ($CONFIG_DIR)"
   rm -rf "$DATA_DIR" && ok "Removed the downloaded $(data_words) ($DATA_DIR)"
   [ -z "$uv_mark" ] || { mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" && : > "$UV_MARKER"; }
-  cur_email=""; custom=""; cur_contacts=""; cur_calendars=""
+  cur_email=""; custom=""; cur_contacts=""; cur_calendars=""; sources_asked=""
   action="fresh"
 fi
 
@@ -277,17 +336,20 @@ EOF
   cur_contacts=""; cur_calendars=""
   if yesno "Let Claude search your contacts?" n; then cur_contacts=true; fi
   if yesno "Let Claude search your calendar?" n; then cur_calendars=true; fi
+  sources_asked=1
 }
+# Both flags are always written, false included, so a later run knows the question was
+# answered and does not ask it again. (tests/test_installer.py runs this function.)
+# >>> write_config
 write_config() {
-  local old="$cur_email" extra="" years=""
+  local old="$cur_email" years=""
   # A calendar_years line the user already set is kept when the file is written again.
   [ ! -f "$ACCOUNTS" ] || years="$(grep -m1 '^calendar_years:' "$ACCOUNTS" || true)"
-  [ -z "$cur_contacts" ] || extra="$extra, contacts: true"
-  [ -z "$cur_calendars" ] || extra="$extra, calendars: true"
   mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
   (
     umask 077
-    printf 'accounts:\n  icloud: { preset: icloud, username: "%s"%s }\n' "$EMAIL" "$extra" > "$ACCOUNTS"
+    printf 'accounts:\n  icloud: { preset: icloud, username: "%s", contacts: %s, calendars: %s }\n' \
+      "$EMAIL" "${cur_contacts:-false}" "${cur_calendars:-false}" > "$ACCOUNTS"
     if [ -n "$years" ]; then
       printf '\n%s\n' "$years" >> "$ACCOUNTS"
     elif [ -n "$cur_calendars" ]; then
@@ -303,6 +365,7 @@ write_config() {
   fi
   [ "$action" = "sources" ] || ok "Saved your email address: $EMAIL"
 }
+# <<< write_config
 
 need_email=""; need_pw=""
 case "$action" in
@@ -318,9 +381,16 @@ fi
 say "Step 3 of 6: your iCloud email address"
 if [ -n "$custom" ]; then
   ok "Using your hand-edited settings in $ACCOUNTS"
+  if ! grep -Eq '^[[:space:]]*(contacts|calendars):|[{,][[:space:]]*(contacts|calendars):' "$ACCOUNTS"; then
+    note "Claude can also search your iCloud Contacts and Calendar, read-only. This installer"
+    note "does not change hand-edited settings, so to turn them on, add these to your iCloud"
+    note "account in $ACCOUNTS, then run the install command again:"
+    note "    contacts: true"
+    note "    calendars: true"
+    note "See $DOCS/README.md#contacts-and-calendars-optional"
+  fi
 elif [ -n "$need_email" ]; then
   [ "$action" = "fresh" ] || [ -z "$cur_email" ] || note "Current address: $cur_email"
-  first_config=""; [ -n "$cur_email" ] || first_config=1
   ask_email
   if [ -n "$cur_email" ] && [ "$cur_email" != "$EMAIL" ]; then
     if [ -d "$DATA_DIR" ] &&
@@ -330,7 +400,7 @@ elif [ -n "$need_email" ]; then
     need_pw=1
     note "A new address needs its own app-specific password, so you'll enter one next."
   fi
-  [ -z "$first_config" ] || ask_sources
+  [ -n "$sources_asked" ] || ask_sources
   write_config
 elif [ "$action" = "sources" ]; then
   EMAIL="$cur_email"
@@ -340,6 +410,16 @@ elif [ "$action" = "sources" ]; then
     ok "Turned on: $(sources_on_words). They are downloaded after your mail, at the next sync."
   else
     ok "Contacts and calendar are off"
+  fi
+elif [ -z "$sources_asked" ]; then
+  ok "Keeping $cur_email"
+  EMAIL="$cur_email"
+  ask_sources
+  write_config
+  if [ -n "$cur_contacts$cur_calendars" ]; then
+    ok "Turned on: $(sources_on_words). They are downloaded after your mail, at the next sync."
+  else
+    ok "Contacts and calendar are off. To turn them on later, run the install command again and choose 6."
   fi
 else
   ok "Keeping $cur_email"
@@ -568,12 +648,28 @@ alias mail-set-password='"$BIN" set-password$alias_acct'
 alias mail-delete-password='"$BIN" delete-password$alias_acct'
 MAIL_SHORTCUTS
 ${N}
+EOF
+# Checked here, after any erase above: "Start over" and a new address delete the old mail.
+# (tests/test_installer.py runs mail_downloaded.)
+# >>> mail_downloaded
+mail_downloaded() { compgen -G "$DATA_DIR/index-*.sqlite" >/dev/null; }
+# <<< mail_downloaded
+if mail_downloaded; then
+  cat <<EOF
+${B}Catching up on mail that arrived since the last sync.${N} This usually takes seconds.
+You can press Ctrl-C at any time; it also keeps up to date by itself whenever Claude
+searches.
+
+EOF
+else
+  cat <<EOF
 ${B}Now downloading your mail for the first time.${N} Newest mail comes first, so recent
 mail is searchable within minutes; a big mailbox can take hours. You can press
 Ctrl-C at any time. It picks up where it left off, and it also keeps up to date by
 itself whenever Claude searches.
 
 EOF
+fi
 [ -n "$custom" ] || [ -z "$cur_contacts$cur_calendars" ] ||
   printf 'Your %s come after the mail has finished downloading.\n\n' "$(sources_on_words)"
 sync_stopped=""
