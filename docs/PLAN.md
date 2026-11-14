@@ -201,9 +201,9 @@ All parsing and decoding happens inside the §7.2 worker.
 README opens with install. Example (GitHub-pinned; PyPI form shown once published):
 
 ```sh
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.1 readonly-safe-mail-mcp set-password icloud
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.1 readonly-safe-mail-mcp check
-uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.1 readonly-safe-mail-mcp sync
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.2 readonly-safe-mail-mcp set-password icloud
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.2 readonly-safe-mail-mcp check
+uvx --from git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.2 readonly-safe-mail-mcp sync
 ```
 
 Copy-paste configs for: Claude Desktop (`claude_desktop_config.json`, `mcpServers`), Claude Code (`claude mcp add`), Cursor (`~/.cursor/mcp.json`), VS Code (`.vscode/mcp.json`, `servers`), generic stdio.

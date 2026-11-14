@@ -23,7 +23,7 @@
 #   7. Starts the first sync (safe to stop with Ctrl-C; it resumes later).
 set -euo pipefail
 
-VERSION="0.3.1"
+VERSION="0.3.2"
 RAW="https://raw.githubusercontent.com/pkellner/readonly-safe-mail-mcp/main"
 PKG="https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v${VERSION}.tar.gz"
 NAME="readonly-safe-mail-mcp"

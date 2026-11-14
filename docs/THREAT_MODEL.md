@@ -204,7 +204,7 @@ boundary.**
 #    standard account; Linux: sudo useradd -m mailmcp).
 # 2. As that user, install and configure:
 sudo -u mailmcp -i
-uv tool install git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.1
+uv tool install git+https://github.com/pkellner/readonly-safe-mail-mcp@v0.3.2
 mkdir -p ~/.config/readonly-safe-mail-mcp && $EDITOR ~/.config/readonly-safe-mail-mcp/accounts.yaml
 readonly-safe-mail-mcp set-password icloud --store file   # mode-600 file in that user's home
 readonly-safe-mail-mcp check && readonly-safe-mail-mcp sync
