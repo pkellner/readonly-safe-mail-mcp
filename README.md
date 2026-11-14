@@ -34,7 +34,7 @@ read-only, with the same app-specific password. See [Contacts and calendars](#co
 > Linux, and Windows are untested. Contacts and calendars have so far been tested only
 > against a simulated server, not against a real account.
 
-## Quick install (Mac, one iCloud account)
+## Quick install or update (Mac, one iCloud account)
 
 Open **Terminal** (Applications → Utilities) and paste:
 
