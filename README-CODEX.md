@@ -89,6 +89,12 @@ The installer asks whether to continue, installs the required software, and asks
 for your iCloud email address. You don't need to install Python, Homebrew, or Git
 yourself. Enter the address you use for iCloud Mail.
 
+It then asks whether Codex may also search your iCloud contacts and your calendar,
+read-only. Press Return to say no to both; that is the same as before. You can turn
+them on later by running the install command again and choosing "Turn contacts and
+calendar on or off". Contacts include phone numbers and addresses. See
+[Contacts and calendars](README.md#contacts-and-calendars-optional).
+
 Keep Terminal open. Next, the installer will help you create an Apple app-specific
 password.
 

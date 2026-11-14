@@ -12,15 +12,18 @@
 #      no Homebrew, Xcode, git, or system Python is needed or changed, and your shell
 #      startup files are not edited.
 #   2. Installs readonly-safe-mail-mcp (pinned version below) with Python 3.13.
-#   3. Asks for your iCloud address and writes ~/.config/readonly-safe-mail-mcp/accounts.yaml.
+#   3. Asks for your iCloud address, and whether Claude may also search your iCloud
+#      Contacts and Calendar (off unless you say yes), and writes
+#      ~/.config/readonly-safe-mail-mcp/accounts.yaml.
 #   4. Opens Apple's page to make an app-specific password, then stores it in your
 #      login Keychain. The password never touches disk or this script's variables.
-#   5. Runs a read-only test login (and helps you fix it if it fails).
+#   5. Runs a read-only test login, also for Contacts and Calendar if you turned them
+#      on (and helps you fix it if it fails).
 #   6. Connects Claude Code, Claude Desktop and Codex, whichever are installed.
 #   7. Starts the first sync (safe to stop with Ctrl-C; it resumes later).
 set -euo pipefail
 
-VERSION="0.2.2"
+VERSION="0.3.0"
 RAW="https://raw.githubusercontent.com/pkellner/readonly-safe-mail-mcp/main"
 PKG="https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v${VERSION}.tar.gz"
 NAME="readonly-safe-mail-mcp"
@@ -84,6 +87,16 @@ yesno() {
   done
 }
 
+sources_on_words() {
+  if [ -n "$cur_contacts" ] && [ -n "$cur_calendars" ]; then echo "contacts and calendar"
+  elif [ -n "$cur_contacts" ]; then echo "contacts"
+  else echo "calendar"; fi
+}
+# What is downloaded to this Mac: the mail, and the contacts and calendar when they are on.
+data_words() {
+  if [ -z "$cur_contacts$cur_calendars" ]; then echo "mail"; else echo "mail, $(sources_on_words)"; fi
+}
+
 # ---------------------------------------------------------------- checks
 [ "$(uname -s)" = "Darwin" ] || fail "this installer is for macOS only." "See the README for other systems."
 { : </dev/tty; } 2>/dev/null || fail "this installer needs to be run in a Terminal window." \
@@ -103,10 +116,15 @@ if ! yesno "Continue?" n; then
 fi
 
 # ---------------------------------------------------------------- earlier setup?
-cur_email=""; custom=""
+cur_email=""; custom=""; cur_contacts=""; cur_calendars=""
 if [ -f "$ACCOUNTS" ]; then
-  cur_email="$(sed -n 's/^  icloud: { preset: icloud, username: "\(.*\)" }$/\1/p' "$ACCOUNTS" | head -1)"
+  # The line this installer writes: the address, then optionally contacts and calendars.
+  cur_email="$(sed -n 's/^  icloud: { preset: icloud, username: "\([^"]*\)"\(, contacts: true\)\{0,1\}\(, calendars: true\)\{0,1\} }$/\1/p' "$ACCOUNTS" | head -1)"
   [ -n "$cur_email" ] || custom=1
+  if [ -n "$cur_email" ]; then
+    grep -q '^  icloud: {.*, contacts: true' "$ACCOUNTS" && cur_contacts=true
+    grep -q '^  icloud: {.*, calendars: true' "$ACCOUNTS" && cur_calendars=true
+  fi
 fi
 pw_saved() {
   security find-generic-password -s "$NAME" -a "$ACCOUNT" >/dev/null 2>&1 ||
@@ -124,6 +142,7 @@ if [ -f "$ACCOUNTS" ] || [ -n "$had_pw" ] || [ -n "$had_data" ]; then
     note "Email:     ${cur_email:-not set yet}"
   fi
   if [ -n "$had_pw" ]; then note "Password:  saved in your Keychain"; else note "Password:  not saved yet"; fi
+  [ -n "$custom" ] || [ -z "$cur_contacts$cur_calendars" ] || note "Also on:   $(sources_on_words)"
   if [ -n "$had_data" ]; then
     note "Mail data: $(du -sh "$DATA_DIR" 2>/dev/null | cut -f1 | tr -d ' ') downloaded to $DATA_DIR"
   else
@@ -136,15 +155,17 @@ if [ -f "$ACCOUNTS" ] || [ -n "$had_pw" ] || [ -n "$had_data" ]; then
     echo "  2) Change the email address"
     echo "  3) Enter a new app-specific password"
   fi
-  echo "  4) Start over: erase the settings, saved password and downloaded mail, then set up again"
+  echo "  4) Start over: erase the settings, saved password and downloaded $(data_words), then set up again"
   echo "  5) Quit without changing anything"
+  [ -n "$custom" ] || echo "  6) Turn contacts and calendar on or off"
   while :; do
     ask "Type a number and press Return [1]: "
     case "${REPLY:-1}" in
       1) action="keep"; break ;;
       2) [ -z "$custom" ] && { action="email"; break; } ;;
       3) [ -z "$custom" ] && { action="password"; break; } ;;
-      4) if yesno "This permanently deletes your settings, saved password and downloaded mail on this Mac (your mail on iCloud is not touched). Erase and start over?" n; then
+      6) [ -z "$custom" ] && { action="sources"; break; } ;;
+      4) if yesno "This permanently deletes your settings, saved password and downloaded $(data_words) on this Mac (your mail on iCloud is not touched). Erase and start over?" n; then
            action="fresh-erase"; break
          fi
          echo "OK, nothing was erased. Choose again." ; continue ;;
@@ -204,9 +225,9 @@ if [ "$action" = "fresh-erase" ]; then
   fi
   uv_mark=""; [ -f "$UV_MARKER" ] && uv_mark=1
   rm -rf "$CONFIG_DIR" && ok "Removed the settings ($CONFIG_DIR)"
-  rm -rf "$DATA_DIR" && ok "Removed the downloaded mail ($DATA_DIR)"
+  rm -rf "$DATA_DIR" && ok "Removed the downloaded $(data_words) ($DATA_DIR)"
   [ -z "$uv_mark" ] || { mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR" && : > "$UV_MARKER"; }
-  cur_email=""; custom=""
+  cur_email=""; custom=""; cur_contacts=""; cur_calendars=""
   action="fresh"
 fi
 
@@ -242,16 +263,45 @@ ask_email() {
     EMAIL="$e"; return 0
   done
 }
+# ask_sources: whether Claude may also search iCloud Contacts and Calendar. Sets
+# cur_contacts and cur_calendars to "true" or "". Both are off unless the answer is yes.
+ask_sources() {
+  cat <<EOF
+
+Optional: Claude can also search your iCloud ${B}Contacts${N} and ${B}Calendar${N}, read-only, with the
+same app-specific password. Both stay off unless you say yes. Neither is ever changed.
+  - Contacts: Claude sees names, phone numbers, email and postal addresses.
+  - Calendar: events from 10 years back to 10 years ahead (calendar_years: 10). If you say
+    yes, $ACCOUNTS gets a commented calendar_years line to change that.
+EOF
+  cur_contacts=""; cur_calendars=""
+  if yesno "Let Claude search your contacts?" n; then cur_contacts=true; fi
+  if yesno "Let Claude search your calendar?" n; then cur_calendars=true; fi
+}
 write_config() {
-  local old="$cur_email"
+  local old="$cur_email" extra="" years=""
+  # A calendar_years line the user already set is kept when the file is written again.
+  [ ! -f "$ACCOUNTS" ] || years="$(grep -m1 '^calendar_years:' "$ACCOUNTS" || true)"
+  [ -z "$cur_contacts" ] || extra="$extra, contacts: true"
+  [ -z "$cur_calendars" ] || extra="$extra, calendars: true"
   mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
-  (umask 077; printf 'accounts:\n  icloud: { preset: icloud, username: "%s" }\n' "$EMAIL" > "$ACCOUNTS")
+  (
+    umask 077
+    printf 'accounts:\n  icloud: { preset: icloud, username: "%s"%s }\n' "$EMAIL" "$extra" > "$ACCOUNTS"
+    if [ -n "$years" ]; then
+      printf '\n%s\n' "$years" >> "$ACCOUNTS"
+    elif [ -n "$cur_calendars" ]; then
+      printf '\n# Years of calendar searched before and after this month (1 to 50).\n' >> "$ACCOUNTS"
+      printf '# Remove the # and change the number to search further back or ahead.\n' >> "$ACCOUNTS"
+      printf '# calendar_years: 10\n' >> "$ACCOUNTS"
+    fi
+  )
   cur_email="$EMAIL"
   if [ -n "$old" ] && [ "$old" != "$EMAIL" ] && [ -d "$DATA_DIR" ]; then
     rm -rf "$DATA_DIR"
     ok "Removed the mail downloaded for $old"
   fi
-  ok "Saved your email address: $EMAIL"
+  [ "$action" = "sources" ] || ok "Saved your email address: $EMAIL"
 }
 
 need_email=""; need_pw=""
@@ -270,6 +320,7 @@ if [ -n "$custom" ]; then
   ok "Using your hand-edited settings in $ACCOUNTS"
 elif [ -n "$need_email" ]; then
   [ "$action" = "fresh" ] || [ -z "$cur_email" ] || note "Current address: $cur_email"
+  first_config=""; [ -n "$cur_email" ] || first_config=1
   ask_email
   if [ -n "$cur_email" ] && [ "$cur_email" != "$EMAIL" ]; then
     if [ -d "$DATA_DIR" ] &&
@@ -279,7 +330,17 @@ elif [ -n "$need_email" ]; then
     need_pw=1
     note "A new address needs its own app-specific password, so you'll enter one next."
   fi
+  [ -z "$first_config" ] || ask_sources
   write_config
+elif [ "$action" = "sources" ]; then
+  EMAIL="$cur_email"
+  ask_sources
+  write_config
+  if [ -n "$cur_contacts$cur_calendars" ]; then
+    ok "Turned on: $(sources_on_words). They are downloaded after your mail, at the next sync."
+  else
+    ok "Contacts and calendar are off"
+  fi
 else
   ok "Keeping $cur_email"
 fi
@@ -330,6 +391,8 @@ until "$BIN" check; do
   warn "  - your regular Apple password was used instead of an app-specific one"
   warn "  - the app-specific password was revoked, or you changed your Apple password since"
   warn "  - no internet connection"
+  [ -z "$cur_contacts$cur_calendars" ] ||
+    warn "  - $(sources_on_words) could not be reached (see above); to turn them off, stop and choose 6 next time"
   [ -z "$custom" ] || fail "the test login failed for your hand-edited settings." \
     "Fix $ACCOUNTS or the passwords, then run the install command again."
   echo "What would you like to do?"
@@ -451,6 +514,7 @@ say "All set"
 ok "Email:     ${cur_email:-from $ACCOUNTS}"
 ok "Password:  saved in your Keychain"
 ok "Mail data: $DATA_DIR (stays on this Mac)"
+[ -n "$custom" ] || [ -z "$cur_contacts$cur_calendars" ] || ok "Also on:   $(sources_on_words) (read-only)"
 if [ -n "$connected" ]; then
   printf '\n%sNext:%s\n' "$B" "$N"
   printf '%s\n' "$restart" | tr ';' '\n' | sed 's/^ *//' | while IFS= read -r line; do
@@ -510,6 +574,8 @@ Ctrl-C at any time. It picks up where it left off, and it also keeps up to date 
 itself whenever Claude searches.
 
 EOF
+[ -n "$custom" ] || [ -z "$cur_contacts$cur_calendars" ] ||
+  printf 'Your %s come after the mail has finished downloading.\n\n' "$(sources_on_words)"
 sync_stopped=""
 trap 'sync_stopped=1' INT
 sync_rc=0

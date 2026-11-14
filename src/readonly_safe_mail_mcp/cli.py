@@ -4,9 +4,9 @@ readonly-safe-mail-mcp                 run the MCP server over stdio (default)
 readonly-safe-mail-mcp set-password A  store account A's password (OS keyring, or --store file)
 readonly-safe-mail-mcp print-rules     show the effective merged rules per account
 readonly-safe-mail-mcp paths           show config and data directories
-readonly-safe-mail-mcp check           check config, credentials, and a read-only connection
-readonly-safe-mail-mcp sync            sync mail into the local index (shows progress)
-readonly-safe-mail-mcp status          sync status and message counts (offline)
+readonly-safe-mail-mcp check           check config, credentials, and a read-only login per source
+readonly-safe-mail-mcp sync            sync mail, then contacts and calendars, into the local indexes
+readonly-safe-mail-mcp status          sync status and counts per source (offline)
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ import sys
 
 import yaml
 
-from . import __version__, credentials, paths
+from . import __version__, credentials, davindex, davsync, paths
 from .config import Account, ConfigError, load_config
+from .dav import DavError
 from .imap import ImapError, MailSource
 from .sanitize import parse_headers
 
@@ -162,6 +163,43 @@ def _connection_check(acct: Account, password: str) -> tuple[bool, list[str]]:
         return False, lines + [f"FAILED: {e}"]
 
 
+def _dav_check(acct: Account, password: str) -> tuple[bool, list[str]]:
+    """Log in to each DAV source that is on and count its address books or calendars, one
+    line per source. Through the guarded connection (dav.py): PROPFIND only, nothing else
+    is sent, and no card or event is fetched."""
+    lines: list[str] = []
+    ok = True
+    sources = {
+        davindex.CONTACTS: ("CardDAV", "address book"),
+        davindex.CALENDARS: ("CalDAV", "calendar"),
+    }
+    try:
+        with davsync.open_dav_source(acct, password) as src:
+            for source in davsync.sources_on(acct):
+                protocol, noun = sources[source]
+                try:
+                    found = src.collections(src.home(source))
+                    if any(it.status != 200 for it in found):
+                        raise DavError(f"{noun} list incomplete (an entry without status 200)")
+                    n = len(davsync.wanted_collections(acct, source, found))
+                    lines.append(
+                        f"{source}: logged in over {protocol}; {n} {noun}(s); only read requests sent"
+                    )
+                    if source == davindex.CALENDARS and acct.calendars is not None:
+                        types = [(it.displayname or "", it.resource_types or ()) for it in found]
+                        unmatched = acct.calendars.unmatched([name for name, t in types if "calendar" in t])
+                        if unmatched:
+                            lines.append(
+                                f"calendars: allow/deny name(s) matching no calendar: {', '.join(unmatched)}"
+                            )
+                except DavError as e:
+                    ok = False
+                    lines.append(f"{source}: FAILED: {e}")
+    except DavError as e:
+        return False, [f"FAILED: {e}"]
+    return ok, lines
+
+
 def _cmd_check(_args) -> int:
     ok = True
     cfg = load_config()
@@ -191,6 +229,9 @@ def _cmd_check(_args) -> int:
             ok = False
             continue
         good, lines = _connection_check(acct, password)
+        if acct.contacts or acct.calendars:
+            dav_good, dav_lines = _dav_check(acct, password)
+            good, lines = good and dav_good, lines + dav_lines
         ok = ok and good
         for line in lines:
             print(f"    {line}")
@@ -281,12 +322,43 @@ def _cmd_sync(args) -> int:
             print(f"{r.account}: FAILED: {r.error}")
         else:
             print(f"{r.account}: +{r.added:,} indexed, -{r.removed:,} removed, {len(r.folders)} folders")
+    rc = _sync_dav(cfg, args.account)
+    return rc or (0 if ok else 1)
+
+
+def _sync_dav(cfg, account: str | None) -> int:
+    """The contacts and calendar sync, after the mail sync has finished and released its lock."""
+    from .sync import SyncBusy
+
+    words = davindex.source_words(cfg)
+    if words:
+        print(f"Syncing {words}...", file=sys.stderr)
+    try:
+        reports = davsync.sync_all(cfg, accounts=[account] if account else None)
+    except SyncBusy:
+        print(
+            f"Another {davindex.source_words(cfg)} sync is already running (CLI or MCP server). "
+            "Try again later.",
+            file=sys.stderr,
+        )
+        return 1
+    except KeyboardInterrupt:
+        print("Interrupted; run sync again to continue.", file=sys.stderr)
+        return 130
+    ok = True
+    for r in reports:
+        if r.error:
+            ok = False
+            print(f"{r.account} {r.source}: FAILED: {r.error}")
+        else:
+            pending = f"; {r.pending:,} event(s) pending expansion (next sync)" if r.pending else ""
+            print(f"{r.account} {r.source}: +{r.added:,} stored, -{r.removed:,} removed{pending}")
     return 0 if ok else 1
 
 
 def _cmd_status(_args) -> int:
     from . import index
-    from .query import status_lines
+    from .query import source_status_lines, status_lines
 
     cfg = load_config()
     path = index.index_path(cfg)
@@ -297,7 +369,28 @@ def _cmd_status(_args) -> int:
     finally:
         if db:
             db.close()
+    dav_path = davindex.index_path(cfg)
+    if dav_path is not None:
+        db = davindex.connect(cfg, create=False)
+        try:
+            statuses = [
+                st
+                for source in (davindex.CONTACTS, davindex.CALENDARS)
+                for st in davindex.source_status(
+                    db, [a.name for a in davindex.dav_accounts(cfg, source)], source
+                )
+            ]
+            for line in source_status_lines(statuses, calendar_years=cfg.calendar_years):
+                print(line)
+        finally:
+            if db:
+                db.close()
     print(f"index: {path}" + ("" if path.exists() else " (not created yet: run sync)"))
+    if dav_path is not None:
+        print(
+            f"{davindex.source_words(cfg)} index: {dav_path}"
+            + ("" if dav_path.exists() else " (not created yet: run sync)")
+        )
     return 0
 
 

@@ -22,6 +22,8 @@ import re
 import sys
 import zipfile
 
+from .vcal import _ical_unescape, _ics_time, _prop, _split_components, _unfold
+
 # --- limits (enforced while decoding, not after) -------------------------------
 
 MAX_INPUT_BYTES = 30_000_000  # encoded part
@@ -338,37 +340,6 @@ def extract_pdf(data: bytes) -> str:
 # --- vCard / iCalendar ----------------------------------------------------------------
 
 
-def _unfold(text: str) -> list[str]:
-    lines: list[str] = []
-    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if raw[:1] in (" ", "\t") and lines:
-            lines[-1] += raw[1:]
-        else:
-            lines.append(raw)
-    return lines
-
-
-def _prop(line: str) -> tuple[str, dict[str, str], str]:
-    head, _, value = line.partition(":")
-    name, *params = head.split(";")
-    pd = {}
-    for p in params:
-        k, _, v = p.partition("=")
-        pd[k.upper()] = v
-    name = name.rsplit(".", 1)[-1].upper()  # item1.EMAIL -> EMAIL
-    return name, pd, value
-
-
-def _ical_unescape(v: str) -> str:
-    return (
-        v.replace("\\n", "\n")
-        .replace("\\N", "\n")
-        .replace("\\,", ",")
-        .replace("\\;", ";")
-        .replace("\\\\", "\\")
-    )
-
-
 _VCARD_LABELS = {
     "FN": "Name",
     "ORG": "Organization",
@@ -418,11 +389,10 @@ def extract_vcf(data: bytes, charset: str | None) -> list[dict]:
         if not label:
             continue
         kind = params.get("TYPE", "").lower()
-        v = _ical_unescape(value)
-        if name == "ADR":
-            v = ", ".join(x for x in v.split(";") if x.strip())
-        elif name == "ORG":
-            v = ", ".join(x for x in v.split(";") if x.strip())
+        if name in ("ADR", "ORG"):
+            v = ", ".join(x for x in _split_components(value) if x.strip())
+        else:
+            v = _ical_unescape(value)
         lines_out.append(f"{label}{f' ({kind})' if kind else ''}: {v}")
     return [{"text": "\n".join(lines_out)}] + items
 
@@ -468,17 +438,6 @@ def extract_ics(data: bytes, charset: str | None) -> str:
             value = _ics_time(value) + (f" ({tz})" if tz else "")
         out.append(f"{_ICS_FIELDS[name]}: {_ical_unescape(value)}")
     return "\n".join(out)
-
-
-def _ics_time(v: str) -> str:
-    m = re.match(r"^(\d{4})(\d\d)(\d\d)(?:T(\d\d)(\d\d)(\d\d)?(Z)?)?$", v.strip())
-    if not m:
-        return v
-    y, mo, d, hh, mm, _, z = m.groups()
-    s = f"{y}-{mo}-{d}"
-    if hh:
-        s += f" {hh}:{mm}" + (" UTC" if z else "")
-    return s
 
 
 # --- forwarded email ---------------------------------------------------------------------

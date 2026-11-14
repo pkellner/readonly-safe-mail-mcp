@@ -3,6 +3,8 @@
 Let an AI assistant search and read **all your email accounts** (iCloud, Gmail, Fastmail,
 Yahoo, any IMAP server) without giving it the power to send, change, or delete mail, and
 without handing it the password-reset links and login codes that sit in every inbox.
+Optionally it can also search your **contacts and calendar** (iCloud, Fastmail, Yahoo),
+read-only, with the same app-specific password. See [Contacts and calendars](#contacts-and-calendars-optional).
 
 - **Read-only by construction.** No sending code exists. IMAP commands pass through an
   allowlist that refuses anything that could change a mailbox.
@@ -29,7 +31,8 @@ without handing it the password-reset links and login codes that sit in every in
 > Do not use it for mail that someone else depends on you to protect.
 >
 > Only iCloud on macOS has been tested against real mail. Gmail, other providers,
-> Linux, and Windows are untested.
+> Linux, and Windows are untested. Contacts and calendars have so far been tested only
+> against a simulated server, not against a real account.
 
 ## Quick install (Mac, one iCloud account)
 
@@ -39,8 +42,9 @@ Open **Terminal** (Applications → Utilities) and paste:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/pkellner/readonly-safe-mail-mcp/main/install.sh)"
 ```
 
-It asks for your iCloud address, opens Apple's page so you can make an app-specific
-password, and does the rest: installs Python and the tool, stores the password in your
+It asks for your iCloud address, asks whether Claude may also search your iCloud contacts
+and calendar (both stay off unless you say yes), opens Apple's page so you can make an
+app-specific password, and does the rest: installs Python and the tool, stores the password in your
 Keychain, tests a read-only login, connects Claude Code, Claude Desktop and Codex
 (whichever you have), and starts the first sync. The connection covers every session
 of those apps on this Mac; ones that were already open need a restart to see it. You don't need Python, Homebrew, git, or Xcode, and it
@@ -48,7 +52,8 @@ doesn't touch the Mac's system files or your shell settings.
 
 **Made a mistake, or want to change something?** Paste the same command again. It shows
 your current setup and asks what you want: keep it (re-test and reconnect), change the
-email address, enter a new password, or start over from scratch.
+email address, enter a new password, turn contacts and calendar on or off, or start over
+from scratch.
 
 **Uninstall.** Paste this into Terminal:
 
@@ -57,16 +62,17 @@ email address, enter a new password, or start over from scratch.
 ```
 
 It lists what it found and asks once, then removes all of it: the tool, its settings, the
-saved password in your Keychain, all downloaded mail, and the connections in Claude Code,
+saved password in your Keychain, all downloaded data (mail, and contacts and calendar if you
+turned them on), and the connections in Claude Code,
 Claude Desktop and Codex (other servers there are left alone). It asks separately before
-removing uv. Your mail on iCloud is never touched. Afterwards, revoke the app-specific
+removing uv. Your mail, contacts and calendar on iCloud are never touched. Afterwards, revoke the app-specific
 password at [account.apple.com](https://account.apple.com) → Sign-In and Security →
 App-Specific Passwords.
 
 Then ask Claude about your email. Want to see what it does first? Read
 [install.sh](install.sh). Everything below is optional detail.
 
-> **Status: pre-release (0.2).** Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
+> **Status: pre-release (0.3).** Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
 > before trusting it with your mail.
 
 ## Install
@@ -75,7 +81,7 @@ Requires [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/inst
 uv fetches Python 3.11+ itself if you don't have it, and git isn't needed.
 
 ```sh
-uv tool install --python 3.13 https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v0.2.2.tar.gz
+uv tool install --python 3.13 https://github.com/pkellner/readonly-safe-mail-mcp/archive/refs/tags/v0.3.0.tar.gz
 ```
 
 ### 1. Create an app-specific password
@@ -100,11 +106,15 @@ accounts:
   # work: { host: imap.example.com, port: 993, username: you@example.com }
 ```
 
+To also search contacts and calendar, add `contacts: true` and `calendars: true` to an
+iCloud, Fastmail or Yahoo account; see [Contacts and calendars](#contacts-and-calendars-optional).
+
 ### 3. Store the password, check, and sync
 
 ```sh
 readonly-safe-mail-mcp set-password icloud   # run in a real terminal; stored in the OS keyring
 readonly-safe-mail-mcp check                 # verified TLS login, one sanitized sample, sandbox status
+                                             # (and a read-only login per contacts or calendar source, if on)
 readonly-safe-mail-mcp sync                  # first sync: newest mail first, safe to stop and resume
 ```
 
@@ -174,7 +184,8 @@ claude mcp add --scope user readonly-safe-mail -- readonly-safe-mail-mcp serve
 Any other MCP client: run `readonly-safe-mail-mcp serve` over stdio.
 
 Then ask things like *"find the emails about the roof repair quote from this week"* or
-*"what did the school say about the field trip?"*
+*"what did the school say about the field trip?"* With contacts and calendar on: *"what is the
+plumber's phone number?"* or *"what do I have on in the week of 3 March?"*
 
 ## Tools the assistant gets
 
@@ -186,6 +197,16 @@ Then ask things like *"find the emails about the roof repair quote from this wee
 | `read_message` | One message, sanitized, quoted replies removed; lists attachments with part numbers |
 | `get_thread` | The whole conversation, oldest first |
 | `request_attachments` | Asks **you** to approve opening attachments; returns their redacted text or images |
+
+Four more tools exist only while an account has the matching source turned on
+([below](#contacts-and-calendars-optional)):
+
+| Tool | What it does |
+|---|---|
+| `search_contacts` | Words, name, organisation, email or phone (digits in any format); one line per card |
+| `read_contact` | One card: phones, emails, addresses, birthday, note |
+| `search_events` | Calendar events by date range and/or words; one line per occurrence |
+| `read_event` | One event: time, repeat rule, location, people, description |
 
 All tools are marked read-only. Results are labeled as untrusted third-party content.
 
@@ -213,6 +234,85 @@ If no sandbox is available (Windows, or Linux without bubblewrap), attachments a
 opened. You can accept that risk with `attachments: ask-unsandboxed`. Set
 `attachments: never` to turn the feature off.
 
+## Contacts and calendars (optional)
+
+Off by default. With it on, the assistant can answer "what is the plumber's number?" or
+"what is on in the week of 3 March?" from a local, sanitized copy, as for mail.
+
+**Turn it on.** The installer asks. By hand, per account (iCloud, Fastmail and Yahoo; the
+same app-specific password is used; `check` tests the login):
+
+```yaml
+accounts:
+  icloud: { preset: icloud, username: you@icloud.com, contacts: true, calendars: true }
+  # only some calendars, by name (default: all; case and spacing ignored; `check` lists
+  # names that match no calendar):
+  # icloud: { ..., calendars: { allow: [Home, Work], deny: [Birthdays] } }
+calendar_years: 10    # years of calendar indexed before and after this month (1 to 50)
+```
+
+Gmail is not supported (Google needs OAuth, which this server does not do); turning either
+source on for it is a config error. Both are read-only protocols (CardDAV and CalDAV). The
+first sync runs after the mail sync, and after that on the same schedule.
+
+**Read-only, and how that is enforced.** Your app-specific password allows writes at the
+provider; this server never uses that. There is no write code, and the only HTTP client in
+the package is a connection class (`dav.py`) that checks every request itself, before a byte
+is sent: only `PROPFIND` and `REPORT` (read-only by specification), only the provider's own
+hosts, only request bodies this package builds, and a fixed set of headers. `PUT`, `DELETE`,
+`PROPPATCH`, `POST`, `MOVE`, `COPY`, `MKCOL`, `LOCK`, `GET` and the rest are refused, as is a
+redirect to another host, so the password goes nowhere else. Tests record what a fake
+server receives and assert that none of them arrives.
+
+**What the assistant sees.**
+- **Contacts:** names, organisations, emails, birthdays, and phone numbers and postal
+  addresses. Phones and addresses are shown on purpose, the one place the usual redaction
+  of digits is switched off: a contact is only useful with them. A number in a phone field,
+  or in an address, is therefore shown even if it is really a code (see the
+  [threat model](docs/THREAT_MODEL.md#contacts-and-calendars) for the exact shapes kept). They still go to your AI
+  provider, so turn contacts on only if you accept that. Notes get the full mail redaction
+  (links, codes, security keywords). Websites, photos and messaging handles are not shown.
+- **Calendar:** title, time, place, people (at most 30) and description, redacted the same
+  way; a description is withheld if it looks security-related. Alarms, attachments and
+  conference links are not shown. Cancelled events and invitations you have not accepted
+  are kept and labelled; an invitation in which your address is not found is labelled
+  "(invitation, acceptance unknown)".
+- Calendar text is written by strangers (anyone can send an invitation), so every result
+  is labelled untrusted content, and repeat rules are expanded in a separate limited
+  process, not in the server (see the [threat model](docs/THREAT_MODEL.md#contacts-and-calendars)).
+
+**How far the calendar reaches.** `calendar_years` (default 10) sets how many years before
+and after the current month are indexed. It is shown in `accounts.yaml` (the installer
+writes it as a comment), in `status` and `list_accounts` next to the range actually indexed,
+and in the reply to an event search that goes outside the range, which names it. Raise it
+to search further; nothing is downloaded again, the dates are rebuilt locally at the next
+sync.
+
+**Limits you may notice.**
+- **Incomplete events.** An event the server cannot fully place in time is kept but marked
+  incomplete, and every date search it could touch ends with a line naming it and the reason,
+  so a date search never looks empty by mistake. Reasons: a time zone it does not know, a
+  repeat rule finer than daily or using hours or minutes, `EXRULE`, more than one rule, a
+  start before 1900, and a few other rare forms.
+- **Outlook invitations** often carry Windows time-zone names ("Pacific Standard Time"), not
+  standard ones. Those events are read as floating times (your Mac's own zone), labelled
+  "(floating)" and marked incomplete.
+- **On Windows**, your machine's own time zone is read with today's daylight-saving rule for
+  every year, so floating and all-day times in a year whose rule differed can be an hour
+  off near the change. Repeat rules there are bounded only by the time limit on the whole
+  expansion process, not per event.
+- **A failing contacts or calendar sync** (a wrong password, say) is tried again at most
+  once per sync interval, so the provider does not see a login attempt at every question.
+  Answers from data older than the interval say so.
+- **Repeating events** are expanded in batches under a time budget. After a large change some
+  may wait for the next sync; `status` says how many ("pending expansion").
+- An event's id changes when the event changes on the server.
+- "Invitation, not accepted" is matched against your account's username only, not your other
+  addresses: an invitation sent to an alias reads "(invitation, acceptance unknown)". So does
+  an event in a calendar someone shares with you, when it has attendees and you are not one.
+- Reminders (to-dos), journals and contact photos are not read. Only iCloud is the intended
+  target; Fastmail and Yahoo use the same protocols, with hosts built in, and are unchecked.
+
 ## Configuration
 
 `accounts.yaml` top-level options:
@@ -224,6 +324,7 @@ folders: { allow: ["*"], deny: [Junk, Spam, Trash, "Deleted Messages", Drafts, A
 sync_if_older_than: 5m       # background sync when the index is older than this
 attachments: ask             # ask | never | ask-unsandboxed
 trusted_elicitation_clients: []  # clients allowed to show the approval prompt themselves
+calendar_years: 10           # contacts and calendar only: years of calendar before and after this month, 1 to 50
 ```
 
 Optional `rules.yaml` in the same folder adds protection. Lists are merged with the
@@ -245,9 +346,9 @@ served again.
 | `serve` | Run the MCP server over stdio (what your client launches) |
 | `set-password ACCOUNT [--store file]` | Store a password in the OS keyring (or a mode-600 file, for dedicated-user installs). On a Mac it offers to use the clipboard, and always asks first |
 | `delete-password ACCOUNT` | Remove the stored password (also revoke it at the provider) |
-| `check` | Config, permissions, sandbox, and a read-only test login (no sync) |
-| `sync [--account A]` | Sync now with progress (Ctrl-C to stop; resumes later) |
-| `status` | Offline: what's indexed and when it last synced |
+| `check` | Config, permissions, sandbox, and a read-only test login for mail, and for contacts and calendar where on (no sync) |
+| `sync [--account A]` | Sync now with progress: mail first, then contacts and calendar (Ctrl-C to stop; resumes later) |
+| `status` | Offline: what's indexed and when it last synced, per source; with calendar on, the range indexed and `calendar_years` |
 | `print-rules`, `paths` | Show effective rules and where files live |
 
 ### Shortcuts (optional, Mac)
@@ -290,10 +391,12 @@ block twice is harmless; it only repeats the lines in `~/.zshrc`.
 - Index: `~/Library/Application Support/readonly-safe-mail-mcp/` (macOS),
   `~/.local/share/readonly-safe-mail-mcp/` (Linux), `%LOCALAPPDATA%` (Windows). It is
   owner-only and holds sanitized text only: no raw mail, links, codes, withheld bodies, or
-  attachment contents. Roughly 4–5 KB per message.
+  attachment contents. Roughly 4–5 KB per message. With contacts or calendar on, a second
+  file beside it (`dav-*.sqlite`) holds those, sanitized the same way except that phone
+  numbers and postal addresses are kept.
 - Keep it out of iCloud Drive, Dropbox, Desktop, and Documents. `sync` refuses folders that
   look cloud-synced.
-- To delete only the downloaded mail, remove that folder; the next sync rebuilds it. To
+- To delete only the downloaded data, remove that folder; the next sync rebuilds it. To
   remove everything, run the uninstall command under [Quick install](#quick-install-mac-one-icloud-account).
 
 ## Security in one paragraph

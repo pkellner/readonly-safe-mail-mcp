@@ -1,4 +1,5 @@
-"""Run the extraction worker in an isolated child process (PLAN.md section 7.2).
+"""Run a worker in an isolated child process (PLAN.md section 7.2): the attachment
+extraction worker (extract.py) or the recurrence expansion worker (expand.py).
 
 The worker gets: no network, no credentials (empty environment, no Keychain/keyring
 services, no config or data directory), read access only to the Python runtime and
@@ -6,12 +7,16 @@ installed packages, no file writes, CPU/time/output limits, and one request on s
 
   macOS:  sandbox-exec with a deny-by-default profile
   Linux:  bubblewrap (bwrap) with every namespace unshared
-  other:  refused, unless config `attachments: ask-unsandboxed`
+  other:  attachments refused, unless config `attachments: ask-unsandboxed`; the
+          expansion worker runs as a plain child: an empty environment, the wall-clock
+          kill and the output cap, and on POSIX the CPU and file-size limits; Windows has
+          no CPU or file-size limit
 A timeout alone is never called a sandbox.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -24,8 +29,13 @@ from pathlib import Path
 
 from . import paths
 
+if os.name == "posix":
+    import resource  # here, not in the forked child: an import there can deadlock on the import lock
+
 TIMEOUT = 60
+CPU_SECONDS = 40
 MAX_REPLY_BYTES = 40_000_000
+EXTRACT = "readonly_safe_mail_mcp.extract"
 
 
 class IsolationUnavailable(RuntimeError):
@@ -34,6 +44,10 @@ class IsolationUnavailable(RuntimeError):
 
 class WorkerError(RuntimeError):
     pass
+
+
+class WorkerTimeout(WorkerError):
+    """The worker was killed at its wall-clock deadline."""
 
 
 @dataclass(frozen=True)
@@ -102,12 +116,13 @@ def macos_profile() -> str:
 """
 
 
-def find_runner(mode: str) -> Runner:
-    """mode: the config `attachments` value."""
+def find_runner(mode: str, worker_module: str = EXTRACT) -> Runner:
+    """mode: the config `attachments` value. "ask-unsandboxed" gives a plain child where no
+    sandbox is available; the runner is then named "unsandboxed", never a sandbox."""
     if mode == "never":
         raise IsolationUnavailable("opening attachments is turned off in config (attachments: never)")
     py = sys.executable  # not resolved: a venv's python finds its packages through pyvenv.cfg
-    worker = (py, "-I", "-m", "readonly_safe_mail_mcp.extract")
+    worker = (py, "-I", "-m", worker_module)
     if sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").exists():
         return Runner("sandbox-exec", ("/usr/bin/sandbox-exec", "-p", macos_profile(), *worker))
     bwrap = shutil.which("bwrap") if sys.platform.startswith("linux") else None
@@ -129,14 +144,40 @@ def find_runner(mode: str) -> Runner:
     )
 
 
-def _limits() -> None:  # runs in the child before exec
+def _limits(cpu_seconds: int) -> None:  # runs in the child between fork and exec: keep it minimal
     try:
-        import resource
-
-        resource.setrlimit(resource.RLIMIT_CPU, (40, 40))
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
         resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
     except Exception:
         pass
+
+
+def call_worker(runner: Runner, request: bytes, *, timeout: float, cpu_seconds: int = CPU_SECONDS) -> dict:
+    """Send one request to a worker child and return its reply object, which has "ok".
+    Raises WorkerTimeout when the child is killed at `timeout`, WorkerError for any other
+    reply that is not a JSON object with "ok"."""
+    try:
+        proc = subprocess.run(
+            list(runner.argv_prefix),
+            input=request,
+            capture_output=True,
+            timeout=timeout,
+            env={"LANG": "C.UTF-8", "PYTHONIOENCODING": "utf-8"},  # nothing inherited: no secrets
+            cwd="/",
+            close_fds=True,
+            preexec_fn=functools.partial(_limits, cpu_seconds) if os.name == "posix" else None,
+        )
+    except subprocess.TimeoutExpired:
+        raise WorkerTimeout("took too long and was stopped") from None
+    if len(proc.stdout) > MAX_REPLY_BYTES:
+        raise WorkerError("produced too much output")
+    try:
+        reply = json.loads(proc.stdout or b"{}")
+    except ValueError:
+        reply = {}
+    if not isinstance(reply, dict) or "ok" not in reply:
+        raise WorkerError(f"reader failed (exit {proc.returncode})")
+    return reply
 
 
 def run_worker(
@@ -144,26 +185,11 @@ def run_worker(
 ) -> list[dict]:
     header = json.dumps({"kind": kind, "encoding": encoding, "charset": charset}).encode() + b"\n"
     try:
-        proc = subprocess.run(
-            list(runner.argv_prefix),
-            input=header + raw,
-            capture_output=True,
-            timeout=timeout,
-            env={"LANG": "C.UTF-8", "PYTHONIOENCODING": "utf-8"},  # nothing inherited: no secrets
-            cwd="/",
-            close_fds=True,
-            preexec_fn=_limits if os.name == "posix" else None,
-        )
-    except subprocess.TimeoutExpired:
+        reply = call_worker(runner, header + raw, timeout=timeout)
+    except WorkerTimeout:
         raise WorkerError("opening the attachment took too long and was stopped") from None
-    if len(proc.stdout) > MAX_REPLY_BYTES:
-        raise WorkerError("attachment produced too much output")
-    try:
-        reply = json.loads(proc.stdout or b"{}")
-    except ValueError:
-        reply = {}
-    if not isinstance(reply, dict) or "ok" not in reply:
-        raise WorkerError(f"attachment reader failed (exit {proc.returncode})")
+    except WorkerError as e:
+        raise WorkerError(f"attachment {e}") from None
     if not reply["ok"]:
         raise WorkerError(str(reply.get("error", "attachment could not be read")))
     return list(reply.get("items", []))

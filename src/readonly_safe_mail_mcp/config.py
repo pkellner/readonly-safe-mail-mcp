@@ -16,11 +16,15 @@ from dataclasses import dataclass, field
 from email.utils import parseaddr
 from importlib import resources
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from . import paths
 from .textnorm import match_form
+
+if TYPE_CHECKING:
+    from .dav import DavHosts
 
 log = logging.getLogger(__name__)
 
@@ -53,11 +57,20 @@ RULE_KEYS = frozenset(
     }
 )
 TOP_KEYS = frozenset(
-    {"accounts", "folders", "sync_if_older_than", "attachments", "trusted_elicitation_clients"}
+    {
+        "accounts",
+        "folders",
+        "sync_if_older_than",
+        "attachments",
+        "trusted_elicitation_clients",
+        "calendar_years",
+    }
 )
-ACCOUNT_KEYS = frozenset({"preset", "host", "port", "username", "folders", "rules"})
+ACCOUNT_KEYS = frozenset({"preset", "host", "port", "username", "folders", "rules", "contacts", "calendars"})
 FOLDER_KEYS = frozenset({"allow", "deny"})
 ATTACHMENT_MODES = ("ask", "never", "ask-unsandboxed")
+DEFAULT_CALENDAR_YEARS = 10
+MAX_CALENDAR_YEARS = 50
 
 
 # --- helpers ----------------------------------------------------------------
@@ -232,6 +245,23 @@ class Folders:
             return False
         return "*" in self.allow or folder in self.allow
 
+    def permits_name(self, name: str) -> bool:
+        """For calendars, chosen by display name: compared in match_form (case, accents and
+        spacing ignored), so "birthdays" in deny drops "Birthdays". Mail folders
+        are IMAP names, compared exactly by permits."""
+        key = match_form(name)
+        if key in {match_form(d) for d in self.deny}:
+            return False
+        return "*" in self.allow or key in {match_form(a) for a in self.allow}
+
+    def unmatched(self, names: list[str]) -> list[str]:
+        """The allow and deny entries that permits_name matches to none of `names`."""
+        keys = {match_form(n) for n in names}
+        return [x for x in (*self.allow, *self.deny) if x != "*" and match_form(x) not in keys]
+
+
+ALL_CALENDARS = Folders(allow=("*",), deny=())
+
 
 def _parse_folders(data, where: str, base: Folders) -> Folders:
     if data is None:
@@ -252,6 +282,9 @@ class Account:
     username: str
     folders: Folders
     rules: Rules
+    contacts: bool = False
+    dav: DavHosts | None = None  # the preset's CardDAV/CalDAV hosts; None without one
+    calendars: Folders | None = None  # calendars on, by display name; None: off
 
 
 @dataclass(frozen=True)
@@ -262,6 +295,7 @@ class Config:
     trusted_elicitation_clients: tuple[str, ...]
     config_dir: Path
     data_dir: Path
+    calendar_years: int = DEFAULT_CALENDAR_YEARS  # years before and after this month indexed
 
 
 def _parse_account(
@@ -299,8 +333,38 @@ def _parse_account(
         layers.append((f"{where}.rules", data["rules"]))
     rules = merge_rules(load_default_rules(), layers)
     folders = _parse_folders(data.get("folders"), f"{where}.folders", base_folders)
+
+    from .dav import DAV_PRESETS  # not at the top: dav imports imap, which imports this module
+
+    contacts = data.get("contacts", False)
+    if not isinstance(contacts, bool):
+        raise ConfigError(f"{where}: contacts must be true or false")
+    raw_cal = data.get("calendars", False)
+    if isinstance(raw_cal, bool):
+        calendars = ALL_CALENDARS if raw_cal else None
+    elif isinstance(raw_cal, dict):
+        calendars = _parse_folders(raw_cal, f"{where}.calendars", ALL_CALENDARS)
+    else:
+        raise ConfigError(f"{where}: calendars must be true, false, or a mapping with allow/deny")
+    dav = DAV_PRESETS.get(preset) if preset is not None else None
+    for source, on, protocol in (("contacts", contacts, "CardDAV"), ("calendars", calendars, "CalDAV")):
+        if on and dav is None:
+            why = (
+                "Gmail needs OAuth, which this server does not support"
+                if preset == "gmail"
+                else f"{protocol} hosts are known only for the presets {', '.join(sorted(DAV_PRESETS))}"
+            )
+            raise ConfigError(f"{where}: {source} cannot be turned on: {why}")
     return Account(
-        name=name, host=host.strip(), port=port, username=username.strip(), folders=folders, rules=rules
+        name=name,
+        host=host.strip(),
+        port=port,
+        username=username.strip(),
+        folders=folders,
+        rules=rules,
+        contacts=contacts,
+        dav=dav,
+        calendars=calendars,
     )
 
 
@@ -339,6 +403,13 @@ def load_config(config_dir: Path | None = None, data_dir: Path | None = None) ->
         _str_list(top.get("trusted_elicitation_clients"), f"{accounts_path}:trusted_elicitation_clients")
     )
 
+    years = top.get("calendar_years", DEFAULT_CALENDAR_YEARS)
+    if isinstance(years, bool) or not isinstance(years, int) or not 1 <= years <= MAX_CALENDAR_YEARS:
+        raise ConfigError(
+            f"{accounts_path}: calendar_years must be a whole number from 1 to {MAX_CALENDAR_YEARS} "
+            "(years of calendar indexed before and after this month)"
+        )
+
     return Config(
         accounts=accounts,
         sync_if_older_than=parse_duration(top.get("sync_if_older_than", "5m")),
@@ -346,4 +417,5 @@ def load_config(config_dir: Path | None = None, data_dir: Path | None = None) ->
         trusted_elicitation_clients=trusted,
         config_dir=cdir,
         data_dir=ddir,
+        calendar_years=years,
     )
