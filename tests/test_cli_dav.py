@@ -241,6 +241,35 @@ def test_sync_mail_only_prints_nothing_about_sources(setup, monkeypatch, capsys)
     assert "Syncing contacts" not in cap.err and "calendar" not in cap.err + cap.out
 
 
+@pytest.mark.parametrize(
+    ("mail_error", "dav_error", "rc", "last"),
+    [
+        (None, None, 0, "Sync finished."),
+        (None, "contacts.icloud.com: login failed", 1, "Sync finished with errors."),
+        ("login failed", None, 1, "Sync finished with errors."),
+    ],
+)
+def test_sync_says_when_it_has_finished(setup, monkeypatch, capsys, mail_error, dav_error, rc, last):
+    setup(contacts=True, calendars=True)
+    monkeypatch.setattr(sync, "sync_all", lambda cfg, **kw: [sync.SyncReport("icloud", error=mail_error)])
+    monkeypatch.setattr(davsync, "sync_all", lambda cfg, **kw: [davsync.DavReport("icloud", error=dav_error)])
+    assert cli.main(["sync"]) == rc
+    assert capsys.readouterr().err.splitlines()[-1] == last
+
+
+def test_sync_interrupted_in_contacts_says_interrupted_not_finished(setup, monkeypatch, capsys):
+    setup(contacts=True, calendars=True)
+    monkeypatch.setattr(sync, "sync_all", lambda cfg, **kw: [sync.SyncReport("icloud")])
+
+    def interrupted(cfg, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(davsync, "sync_all", interrupted)
+    assert cli.main(["sync"]) == 130
+    err = capsys.readouterr().err
+    assert err.splitlines()[-1] == "Interrupted; run sync again to continue." and "finished" not in err
+
+
 def test_source_words(setup):
     assert davindex.source_words(setup(True, False)) == "contacts"
     assert davindex.source_words(setup(False, True)) == "calendar"

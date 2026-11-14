@@ -324,7 +324,11 @@ def _cmd_sync(args) -> int:
         else:
             print(f"{r.account}: +{r.added:,} indexed, -{r.removed:,} removed, {len(r.folders)} folders")
     rc = _sync_dav(cfg, args.account, progress)
-    return rc or (0 if ok else 1)
+    if rc == 130:  # interrupted: _sync_dav has said so
+        return rc
+    rc = rc or (0 if ok else 1)
+    print("Sync finished." if rc == 0 else "Sync finished with errors.", file=sys.stderr)
+    return rc
 
 
 def _sync_dav(cfg, account: str | None, progress) -> int:
