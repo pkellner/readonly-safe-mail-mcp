@@ -57,8 +57,11 @@ from scratch.
 
 **Update to a new version.** Paste the same command again. Whichever choice you make, it
 installs the latest release and keeps your account, password and downloaded mail; choose 1
-to keep everything as it is, or 6 to turn contacts and calendar on at the same time. It then
-re-tests the login. Restart open Claude sessions to see new tools. If the test says
+to keep everything as it is. If you have not been asked about contacts and calendar yet, it
+asks now, yes or no for each; choose 6 on a later run to change the answers. If your
+settings file holds more than the installer writes (several accounts, folder rules, your own
+comments), it leaves the file alone and shows the two lines to add yourself (see
+[Contacts and calendars](#contacts-and-calendars-optional)). It then re-tests the login. Restart open Claude sessions to see new tools. If the test says
 `Keychain Access Denied`, run `~/.local/bin/readonly-safe-mail-mcp set-password icloud` once
 in Terminal.
 
