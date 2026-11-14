@@ -1,6 +1,6 @@
 [project]
 name = "readonly-safe-mail-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "Read-only, redacting, multi-account mail, contacts and calendar MCP server with local sanitized search indexes"
 readme = "README.md"
 license = "MIT"

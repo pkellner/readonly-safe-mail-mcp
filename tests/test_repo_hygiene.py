@@ -99,4 +99,4 @@ def test_version_is_the_same_in_every_place():
         "docs/PLAN.md": one("docs/PLAN.md", r"@v([0-9][0-9.]*)"),
     }
     assert seen == dict.fromkeys(seen, __version__)
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.3.1"

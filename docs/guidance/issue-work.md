@@ -82,7 +82,9 @@ The DAV fetch itself is not in the preview: it needs a server, and the tests cov
 
 Not written down yet. What is known:
 
-- The version is in three places: `pyproject.toml:3`, `install.sh:23`, `README.md:78`.
+- The version is in `pyproject.toml`, `src/readonly_safe_mail_mcp/__init__.py`, `install.sh`
+  (`VERSION=`), the tarball line of `README.md`, and the `@v` lines of `docs/THREAT_MODEL.md`
+  and `docs/PLAN.md`; `tests/test_repo_hygiene.py` checks they agree and pins the number.
 - A release is the tag `v<version>`; pushing `main` and pushing a tag each need the op's own
   go (`AGENTS.md`, Branches and environments).
 - The op's installed copy is updated with `uv tool install --force`, and the password must
