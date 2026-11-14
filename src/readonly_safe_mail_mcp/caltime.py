@@ -707,10 +707,12 @@ def _expand_repeating(
     key: str,
     exp: Expansion,
     progress: Progress,
+    report: Callable[[], None],
 ) -> None:
-    """Repeating events through the worker, within exp's budget. An event is blamed only
-    for what the worker said about it, or for a lone retry of it killed at its deadline;
-    the worker's start is measured first and not counted against any event."""
+    """Repeating events through the worker, within exp's budget; report() after each batch.
+    An event is blamed only for what the worker said about it, or for a lone retry of it
+    killed at its deadline; the worker's start is measured first and not counted against
+    any event."""
     runner = exp.runner or isolate.find_runner("ask-unsandboxed", EXPAND_WORKER)
     started = exp.clock()
 
@@ -767,21 +769,32 @@ def _expand_repeating(
             _store(db, eid, timing, starts, win, local, key, problem)
             progress.expanded += 1
         db.commit()
+        report()
         if out_of_time or progress.stopped:
             break
 
 
-def expand_pending(db: sqlite3.Connection, years: int, exp: Expansion) -> Progress:
+def expand_pending(
+    db: sqlite3.Connection,
+    years: int,
+    exp: Expansion,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> Progress:
     """Build the occurrences of every event not yet built for the current window, zone and
     EXPANDER_VERSION. Repeating events go through the worker under exp's deadlines and
-    budget; what the budget leaves is pending until the next call."""
+    budget; what the budget leaves is pending until the next call. on_progress(done, total)
+    is called at the start, after the one-off events and after each batch of repeating ones."""
     local = (exp.zone or local_zone)()
     win = window(exp.today(), years)
     key = f"{EXPANDER_VERSION}|{win.first}|{win.end}|{zone_id(local)}"
     davindex.set_window(db, win.years, win.first, win.end, key)
     progress = Progress(win, key)
+    pending = davindex.pending_events(db, key)
+    total = len(pending)
+    report = (lambda: on_progress(progress.expanded, total)) if on_progress and total else lambda: None
+    report()
     repeating = []
-    for eid, timing_json in davindex.pending_events(db, key):
+    for eid, timing_json in pending:
         timing = json.loads(timing_json)
         if timing["repeat"]:
             repeating.append((eid, timing))
@@ -789,7 +802,9 @@ def expand_pending(db: sqlite3.Connection, years: int, exp: Expansion) -> Progre
             _store(db, eid, timing, None, win, local, key, "")
             progress.expanded += 1
     db.commit()
+    if progress.expanded:
+        report()
     if repeating:
-        _expand_repeating(db, repeating, win, local, key, exp, progress)
+        _expand_repeating(db, repeating, win, local, key, exp, progress, report)
     progress.pending = davindex.count_pending(db, key)
     return progress

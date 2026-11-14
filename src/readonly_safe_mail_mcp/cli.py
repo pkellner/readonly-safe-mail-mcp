@@ -294,7 +294,8 @@ def _cmd_sync(args) -> int:
         with mu:
             if done in (0, total) or now - last[0] >= 2:
                 last[0] = now
-                print(f"  {account}/{folder}: {done:,} / {total:,}", file=sys.stderr, flush=True)
+                where = f"{account}/{folder}" if account else folder
+                print(f"  {where}: {done:,} / {total:,}", file=sys.stderr, flush=True)
 
     import signal
 
@@ -322,11 +323,11 @@ def _cmd_sync(args) -> int:
             print(f"{r.account}: FAILED: {r.error}")
         else:
             print(f"{r.account}: +{r.added:,} indexed, -{r.removed:,} removed, {len(r.folders)} folders")
-    rc = _sync_dav(cfg, args.account)
+    rc = _sync_dav(cfg, args.account, progress)
     return rc or (0 if ok else 1)
 
 
-def _sync_dav(cfg, account: str | None) -> int:
+def _sync_dav(cfg, account: str | None, progress) -> int:
     """The contacts and calendar sync, after the mail sync has finished and released its lock."""
     from .sync import SyncBusy
 
@@ -334,7 +335,7 @@ def _sync_dav(cfg, account: str | None) -> int:
     if words:
         print(f"Syncing {words}...", file=sys.stderr)
     try:
-        reports = davsync.sync_all(cfg, accounts=[account] if account else None)
+        reports = davsync.sync_all(cfg, accounts=[account] if account else None, progress=progress)
     except SyncBusy:
         print(
             f"Another {davindex.source_words(cfg)} sync is already running (CLI or MCP server). "

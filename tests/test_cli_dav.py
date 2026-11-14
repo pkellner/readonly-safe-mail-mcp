@@ -223,7 +223,7 @@ def test_sync_busy_says_which_sources(setup, monkeypatch, capsys, contacts, cale
     setup(contacts, calendars)
     monkeypatch.setattr(sync, "sync_all", lambda cfg, **kw: [sync.SyncReport("icloud")])
 
-    def busy(cfg, accounts=None):
+    def busy(cfg, accounts=None, **kw):
         raise SyncBusy
 
     monkeypatch.setattr(davsync, "sync_all", busy)

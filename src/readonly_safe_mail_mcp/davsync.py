@@ -33,7 +33,7 @@ from .dav import (
     DavTooLarge,
 )
 from .fieldpolicy import contact_fields, display_line
-from .sync import sync_lock
+from .sync import ProgressFn, sync_lock
 from .vcal import parse_vcard
 
 log = logging.getLogger(__name__)
@@ -120,17 +120,28 @@ def _listing(items: list[DavItem], kind: _Kind = _KINDS[davindex.CONTACTS]) -> d
 
 
 def _sync_collection(
-    db, src: DavSource, acct: Account, kind: _Kind, coll: davindex.Collection, ctag: str | None, report
+    db,
+    src: DavSource,
+    acct: Account,
+    kind: _Kind,
+    coll: davindex.Collection,
+    ctag: str | None,
+    report,
+    progress: ProgressFn | None,
 ) -> None:
     """One address book or calendar. Rows whose href is gone are deleted, and the new ctag
     stored, only after a complete listing and every changed item processed; the caller
-    commits. Anything less raises and the caller rolls the deletions back."""
+    commits. Anything less raises and the caller rolls the deletions back. progress gets
+    the changed items fetched so far, under "contacts/<book>" or "calendars/<calendar>"."""
     loc = DavLocation(coll.host, coll.href)
     current = _listing(src.etags(loc), kind)
     known = kind.etags(db, coll.id)
     gone = set(known) - set(current)
     changed = [h for h, e in current.items() if known.get(h) != e]
     batches = [changed[i : i + MAX_MULTIGET_HREFS] for i in range(0, len(changed), MAX_MULTIGET_HREFS)]
+    label, total, done = f"{kind.source}/{coll.name or kind.collection}", len(changed), 0
+    if progress and total:
+        progress(acct.name, label, 0, total)
     while batches:
         batch = batches.pop(0)
         try:
@@ -143,6 +154,9 @@ def _sync_collection(
                 continue
             log.warning("%s: one %s is over the size cap; nothing of it is kept", acct.name, kind.item)
             kind.store(db, coll.id, batch[0], current[batch[0]], None, acct)
+            done += 1
+            if progress:
+                progress(acct.name, label, done, total)
             continue
         wanted = {unquote(h): h for h in batch}
         answered = set()
@@ -164,6 +178,9 @@ def _sync_collection(
             raise DavIncomplete(
                 f"{kind.collection} answer is missing {len(batch) - len(answered)} {kind.item}(s)"
             )
+        done += len(batch)
+        if progress:
+            progress(acct.name, label, done, total)
     report.removed += kind.delete(db, coll.id, gone)
     davindex.set_ctag(db, coll.id, ctag)
 
@@ -183,7 +200,9 @@ def wanted_collections(acct: Account, source: str, found: list[DavItem]) -> list
     return [it for it in found if _wanted(acct, _KINDS[source], it)]
 
 
-def _sync_source(db, src: DavSource, acct: Account, kind: _Kind, report: DavReport) -> list[str]:
+def _sync_source(
+    db, src: DavSource, acct: Account, kind: _Kind, report: DavReport, progress: ProgressFn | None
+) -> list[str]:
     """Sync every address book, or every calendar, of one account. Returns a problem per
     collection left incomplete."""
     found = src.collections(src.home(kind.source))
@@ -212,7 +231,7 @@ def _sync_source(db, src: DavSource, acct: Account, kind: _Kind, report: DavRepo
         )
         if it.ctag is None or it.ctag != coll.ctag:
             try:
-                _sync_collection(db, src, acct, kind, coll, it.ctag, report)
+                _sync_collection(db, src, acct, kind, coll, it.ctag, report, progress)
             except DavAuthError:
                 raise
             except DavError as e:
@@ -240,6 +259,7 @@ def sync_account(
     *,
     open_source: SourceOpener = open_dav_source,
     password_fn: Callable[[str], str] = credentials.get_password,
+    progress: ProgressFn | None = None,
 ) -> list[DavReport]:
     """Fetch every DAV source of one account that is on: one report per source."""
     reports = [DavReport(acct.name, source) for source in sources_on(acct)]
@@ -251,7 +271,7 @@ def sync_account(
         with open_source(acct, password) as src:
             for report in reports:
                 try:
-                    problems = _sync_source(db, src, acct, _KINDS[report.source], report)
+                    problems = _sync_source(db, src, acct, _KINDS[report.source], report, progress)
                 except DavAuthError:
                     raise
                 except Exception as e:  # this source only: the account's other source still runs
@@ -278,13 +298,17 @@ def _failed(db, acct: Account, report: DavReport, e: Exception) -> None:
     davindex.record_attempt(db, acct.name, report.source, ok=False, error=report.error)
 
 
-def _expand(cfg: Config, reports: list[DavReport], expansion: caltime.Expansion) -> None:
+def _expand(
+    cfg: Config, reports: list[DavReport], expansion: caltime.Expansion, on_progress: ProgressFn | None
+) -> None:
     """Build occurrences for the current window, with no network request: after a fetch,
-    and also when nothing changed on the server or it could not be reached."""
+    and also when nothing changed on the server or it could not be reached. The count is
+    across every account, so on_progress gets no account name."""
     db = davindex.connect(cfg, create=True)
     assert db is not None
+    count = (lambda done, total: on_progress("", "event dates", done, total)) if on_progress else None
     try:
-        progress = caltime.expand_pending(db, cfg.calendar_years, expansion)
+        progress = caltime.expand_pending(db, cfg.calendar_years, expansion, count)
         for r in reports:
             if r.source == davindex.CALENDARS:
                 r.pending = davindex.count_pending(db, progress.key, r.account)
@@ -309,6 +333,7 @@ def sync_all(
     *,
     accounts: list[str] | None = None,
     expansion: caltime.Expansion = caltime.PRODUCTION,
+    progress: ProgressFn | None = None,
     **kw,
 ) -> list[DavReport]:
     """Sync every account with a DAV source on, one after another, then expand calendar
@@ -319,7 +344,7 @@ def sync_all(
         return []
     with sync_lock(cfg, LOCK_NAME):
         davindex.remove_other_generations(cfg)
-        reports = [r for a in targets for r in sync_account(cfg, a, **kw)]
+        reports = [r for a in targets for r in sync_account(cfg, a, progress=progress, **kw)]
         if davindex.dav_accounts(cfg, davindex.CALENDARS):
-            _expand(cfg, reports, expansion)
+            _expand(cfg, reports, expansion, progress)
         return reports

@@ -1026,7 +1026,7 @@ def test_cli_sync_runs_contacts_after_mail(env, monkeypatch, capsys):
         sync, "sync_all", lambda cfg, **kw: order.append("mail") or [sync.SyncReport("icloud")]
     )
 
-    def dav_sync(cfg, accounts=None):
+    def dav_sync(cfg, accounts=None, **kw):
         order.append("dav")
         return [davsync.DavReport("icloud", error="contacts.icloud.com: login failed")]
 
@@ -1038,12 +1038,14 @@ def test_cli_sync_runs_contacts_after_mail(env, monkeypatch, capsys):
         "icloud contacts: FAILED: contacts.icloud.com: login failed",
     ]
     monkeypatch.setattr(
-        davsync, "sync_all", lambda cfg, accounts=None: [davsync.DavReport("icloud", added=4, removed=1)]
+        davsync,
+        "sync_all",
+        lambda cfg, accounts=None, **kw: [davsync.DavReport("icloud", added=4, removed=1)],
     )
     assert cli.main(["sync"]) == 0
     assert capsys.readouterr().out.splitlines()[-1] == "icloud contacts: +4 stored, -1 removed"
 
-    def busy(cfg, accounts=None):
+    def busy(cfg, accounts=None, **kw):
         raise SyncBusy
 
     monkeypatch.setattr(davsync, "sync_all", busy)
@@ -1051,3 +1053,45 @@ def test_cli_sync_runs_contacts_after_mail(env, monkeypatch, capsys):
     err = capsys.readouterr().err
     # this config has contacts only; calendar-only and both are in test_cli_dav.py
     assert "Another contacts sync is already running (CLI or MCP server). Try again later.\n" in err
+
+
+# --- progress while syncing ------------------------------------------------------------
+
+
+def test_progress_counts_each_address_book_by_batch(tmp_path, dav, tls_pair):
+    cfg = make_cfg(tmp_path)
+    seed(dav, 150)
+    calls = []
+    rep = run(cfg, dav, tls_pair, progress=lambda *a: calls.append(a))
+    assert (rep.error, rep.added) == (None, 150)
+    assert calls == [
+        ("icloud", "contacts/Contacts", 0, 150),
+        ("icloud", "contacts/Contacts", 100, 150),
+        ("icloud", "contacts/Contacts", 150, 150),
+    ]
+    calls.clear()
+    run(cfg, dav, tls_pair, progress=lambda *a: calls.append(a))  # nothing changed: nothing to count
+    assert calls == []
+
+
+def test_cli_sync_shows_the_contacts_count_as_it_goes(tmp_path, monkeypatch, capsys, dav, tls_pair):
+    from readonly_safe_mail_mcp import sync
+
+    monkeypatch.setenv("RSMM_CONFIG_DIR", str(write_accounts(tmp_path, ON)))
+    monkeypatch.setenv("RSMM_DATA_DIR", str(tmp_path / "data"))
+    seed(dav, 150)
+    real = davsync.sync_all
+    monkeypatch.setattr(sync, "sync_all", lambda cfg, **kw: [sync.SyncReport("icloud")])
+    monkeypatch.setattr(
+        davsync,
+        "sync_all",
+        lambda cfg, **kw: real(
+            cfg, open_source=lambda a, p: dav.srv.source(tls_pair[1]), password_fn=lambda _: PASSWORD, **kw
+        ),
+    )
+    assert cli.main(["sync"]) == 0
+    cap = capsys.readouterr()
+    shown = [ln for ln in cap.err.splitlines() if "contacts/" in ln]
+    assert shown[0] == "  icloud/contacts/Contacts: 0 / 150"
+    assert shown[-1] == "  icloud/contacts/Contacts: 150 / 150"
+    assert cap.out.splitlines()[-1] == "icloud contacts: +150 stored, -0 removed"

@@ -1694,7 +1694,7 @@ def test_cli_sync_reports_pending(env, monkeypatch, capsys):
     monkeypatch.setattr(
         davsync,
         "sync_all",
-        lambda cfg, accounts=None: [davsync.DavReport("icloud", "calendars", 5, 0, None, 40)],
+        lambda cfg, accounts=None, **kw: [davsync.DavReport("icloud", "calendars", 5, 0, None, 40)],
     )
     assert cli.main(["sync"]) == 0
     assert capsys.readouterr().out.splitlines()[-1] == (
@@ -2128,3 +2128,19 @@ def test_concurrent_index_opens_keep_the_umask_and_owner_only_files(tmp_path, mo
         os.umask(old)
     if os.name == "posix":
         assert all(os.stat(p).st_mode & 0o077 == 0 for p in files)
+
+
+def test_progress_counts_each_calendar_and_the_event_dates(tmp_path, cal, tls_pair):
+    cfg = make_cfg(tmp_path)
+    seed(cal, 2)
+    cal.put("r.ics", "er", ics(vevent("DTSTART:20260302T170000Z", "RRULE:FREQ=WEEKLY;COUNT=3", uid="r")))
+    calls = []
+    rep = run(cfg, cal, tls_pair, progress=lambda *a: calls.append(a))
+    assert (rep.error, rep.added, rep.pending) == (None, 3, 0)
+    assert calls == [
+        ("icloud", "calendars/Home", 0, 3),
+        ("icloud", "calendars/Home", 3, 3),
+        ("", "event dates", 0, 3),
+        ("", "event dates", 2, 3),  # the one-off events, then each batch of repeating ones
+        ("", "event dates", 3, 3),
+    ]
