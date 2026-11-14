@@ -55,6 +55,13 @@ your current setup and asks what you want: keep it (re-test and reconnect), chan
 email address, enter a new password, turn contacts and calendar on or off, or start over
 from scratch.
 
+**Update to a new version.** Paste the same command again. Whichever choice you make, it
+installs the latest release and keeps your account, password and downloaded mail; choose 1
+to keep everything as it is, or 6 to turn contacts and calendar on at the same time. It then
+re-tests the login. Restart open Claude sessions to see new tools. If the test says
+`Keychain Access Denied`, run `~/.local/bin/readonly-safe-mail-mcp set-password icloud` once
+in Terminal.
+
 **Uninstall.** Paste this into Terminal:
 
 ```sh
